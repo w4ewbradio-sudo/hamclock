@@ -195,7 +195,7 @@ function loadEnabled() {
     if (Array.isArray(raw)) return new Set(raw.filter((id) => ALL_IDS.includes(id)));
   } catch { /* fall through to the default set */ }
   // first-load default: a legible starting rotation (ids not yet registered are dropped)
-  return new Set(["paths", "moon", "muf"].filter((id) => ALL_IDS.includes(id)));
+  return new Set(["paths", "psk", "moon", "muf"].filter((id) => ALL_IDS.includes(id)));
 }
 function loadAuto() {
   const v = localStorage.getItem("hcAuto");

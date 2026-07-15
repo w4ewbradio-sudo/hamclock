@@ -84,7 +84,7 @@ const lsSave = (v) => { try { localStorage.setItem(LS_KEY, JSON.stringify(v)); }
 
 export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
   let data = { updated: null, reports: [] };
-  let timer = null, lastRun = 0, emptyStreak = 0;
+  let timer = null, lastRun = 0, emptyStreak = 0, lastKey = null;
   // Persist last-good reports across page reloads: the display fills instantly,
   // and a reload inside the 5-minute gap does NOT re-query (burst protection -
   // pskreporter soft-throttles chatty IPs by returning EMPTY results).
@@ -101,7 +101,7 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
       const windowSec = Math.floor(p.windowSec || 1800);
       // Big windows (6h/24h) are heavier queries: back off to 15-minute re-polls.
       const gap = windowSec >= 21600 ? 15 * 60000 : Math.max(minMs, MIN_MS);
-      if (Date.now() - lastRun < (force ? 60000 : gap - 5000)) return;  // even "force" floors at 1 min
+      if (Date.now() - lastRun < (force ? 15000 : gap - 5000)) return;  // settings-driven refreshes floor at 15s
       lastRun = Date.now();
       const who = p.direction === "receiver" ? "receiverCallsign" : "senderCallsign";
       const url = "https://retrieve.pskreporter.info/query?" + who + "=" + encodeURIComponent(me)
@@ -112,8 +112,11 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
       const reports = mapPskJson(json, { direction: p.direction || "sender", limit });
       // Soft-throttle defense: pskreporter answers a penalized IP with a VALID but
       // EMPTY report list. Don't let one such answer wipe real data - only accept
-      // an empty result once two consecutive polls agree.
-      if (!reports.length && data.reports.length && emptyStreak < 1) { emptyStreak++; return; }
+      // an empty result once two consecutive polls agree. EXCEPT when the query
+      // itself changed (direction/window/call): then the new answer is authoritative.
+      const key = me + "|" + p.direction + "|" + windowSec;
+      const queryChanged = key !== lastKey; lastKey = key;
+      if (!queryChanged && !reports.length && data.reports.length && emptyStreak < 1) { emptyStreak++; return; }
       emptyStreak = reports.length ? 0 : emptyStreak + 1;
       data = { updated: new Date().toISOString(), reports };
       lsSave({ at: lastRun, updated: data.updated, reports });
