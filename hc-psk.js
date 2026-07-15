@@ -78,9 +78,21 @@ export function jsonp(url, timeoutMs = 20000) {
 const MIN_MS = 5 * 60 * 1000;
 
 // getStation() -> {call,...}; getPsk() -> {direction, windowSec, contact}
+const LS_KEY = "hcPskCache1";
+const lsLoad = () => { try { return JSON.parse(localStorage.getItem(LS_KEY)) || null; } catch { return null; } };
+const lsSave = (v) => { try { localStorage.setItem(LS_KEY, JSON.stringify(v)); } catch { /* session-only */ } };
+
 export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
   let data = { updated: null, reports: [] };
-  let timer = null, lastRun = 0;
+  let timer = null, lastRun = 0, emptyStreak = 0;
+  // Persist last-good reports across page reloads: the display fills instantly,
+  // and a reload inside the 5-minute gap does NOT re-query (burst protection -
+  // pskreporter soft-throttles chatty IPs by returning EMPTY results).
+  const saved = lsLoad();
+  if (saved && Date.now() - (saved.at || 0) < 24 * 3600 * 1000 && Array.isArray(saved.reports)) {
+    data = { updated: saved.updated || null, reports: saved.reports };
+    lastRun = saved.at || 0;
+  }
   async function refresh(force) {
     try {
       const p = getPsk();
@@ -89,7 +101,7 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
       const windowSec = Math.floor(p.windowSec || 1800);
       // Big windows (6h/24h) are heavier queries: back off to 15-minute re-polls.
       const gap = windowSec >= 21600 ? 15 * 60000 : Math.max(minMs, MIN_MS);
-      if (!force && Date.now() - lastRun < gap - 5000) return;
+      if (Date.now() - lastRun < (force ? 60000 : gap - 5000)) return;  // even "force" floors at 1 min
       lastRun = Date.now();
       const who = p.direction === "receiver" ? "receiverCallsign" : "senderCallsign";
       const url = "https://retrieve.pskreporter.info/query?" + who + "=" + encodeURIComponent(me)
@@ -97,13 +109,20 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
         + (p.contact ? "&appcontact=" + encodeURIComponent(p.contact) : "");
       const json = await jsonp(url);
       const limit = windowSec >= 21600 ? 200 : 50;      // long windows plot more of the story
-      data = { updated: new Date().toISOString(), reports: mapPskJson(json, { direction: p.direction || "sender", limit }) };
+      const reports = mapPskJson(json, { direction: p.direction || "sender", limit });
+      // Soft-throttle defense: pskreporter answers a penalized IP with a VALID but
+      // EMPTY report list. Don't let one such answer wipe real data - only accept
+      // an empty result once two consecutive polls agree.
+      if (!reports.length && data.reports.length && emptyStreak < 1) { emptyStreak++; return; }
+      emptyStreak = reports.length ? 0 : emptyStreak + 1;
+      data = { updated: new Date().toISOString(), reports };
+      lsSave({ at: lastRun, updated: data.updated, reports });
     } catch { /* keep last good; retry next interval */ }
   }
   return {
     get: () => data,
     refresh: () => refresh(true),
-    start() { refresh(true); timer = setInterval(() => refresh(false), Math.max(minMs, MIN_MS)); },
+    start() { refresh(false); timer = setInterval(() => refresh(false), Math.max(minMs, MIN_MS)); },
     stop() { if (timer) clearInterval(timer); },
   };
 }
