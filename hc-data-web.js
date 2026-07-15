@@ -19,6 +19,7 @@ import { makeAuroraCache } from "./feeds/aurora.js";
 import { makeWeatherCache } from "./feeds/weather.js";
 import { makeSatsCache } from "./feeds/sats.js";
 import { bandFor } from "./feeds/dx.js";
+import { makePskJsonpCache } from "./hc-psk.js";
 
 // ---- pure helpers (unit-tested) ----
 
@@ -46,32 +47,6 @@ export function parseSpotHole(json, limit = 25) {
   return out;
 }
 
-// PSKReporter JSONP JSON -> the same report shape parsePsk (XML) produced.
-// direction "sender": reports OF my transmissions (who hears me) - remote = receiver.
-// direction "receiver": what I hear - remote = sender. rxCall/rxGrid always carry
-// the REMOTE end because that's what the map plots and the panel lists.
-export function mapPskJson(json, { direction = "sender", limit = 50 } = {}) {
-  const rr = json && Array.isArray(json.receptionReport) ? json.receptionReport : [];
-  const out = [];
-  for (const r of rr) {
-    const remoteCall = direction === "sender" ? r.receiverCallsign : r.senderCallsign;
-    const remoteGrid = direction === "sender" ? r.receiverLocator : r.senderLocator;
-    if (!remoteGrid) continue;
-    const snr = Number(r.sNR);
-    out.push({
-      rxCall: remoteCall || "",
-      rxGrid: remoteGrid,
-      txCall: (direction === "sender" ? r.senderCallsign : r.receiverCallsign) || "",
-      freqHz: Number(r.frequency) || 0,
-      mode: r.mode || "",
-      snr: Number.isFinite(snr) ? snr : null,
-      epoch: Number(r.flowStartSeconds) || 0,
-    });
-  }
-  out.sort((a, b) => b.epoch - a.epoch);
-  return out.slice(0, limit);
-}
-
 // NOAA SWPC daily-solar-indices.txt -> [{date, ssn}] (last ~30 days). Data rows:
 // "2026 06 15  117     78     330 ..." = Y M D flux SSN area ...
 export function parseDsd(text) {
@@ -87,27 +62,11 @@ export function parseDsd(text) {
   return out;
 }
 
-// ---- JSONP (PSKReporter has no CORS but supports callback=) ----
-let jsonpN = 0;
-function jsonp(url, timeoutMs = 20000) {
-  return new Promise((resolve, reject) => {
-    const cb = "hcJsonpCb" + (++jsonpN);   // no leading underscores: pskreporter strips them from callback=
-    const s = document.createElement("script");
-    const done = (fn, v) => { clearTimeout(timer); delete window[cb]; s.remove(); fn(v); };
-    const timer = setTimeout(() => done(reject, new Error("jsonp timeout")), timeoutMs);
-    window[cb] = (data) => done(resolve, data);
-    s.onerror = () => done(reject, new Error("jsonp load error"));
-    s.src = url + (url.includes("?") ? "&" : "?") + "callback=" + cb;
-    document.head.appendChild(s);
-  });
-}
-
 const SAT_WATCHLIST = [
   { name: "ISS", norad: 25544 }, { name: "SO-50", norad: 27607 },
   { name: "AO-91", norad: 43017 }, { name: "FO-29", norad: 24278 },
   { name: "RS-44", norad: 44909 }, { name: "PO-101", norad: 43678 },
 ];
-const PSK_MIN_MS = 5 * 60 * 1000;   // pskreporter.info policy: never faster than 5 min
 
 // getStation() -> {call, grid, lat, lon}; getPsk() -> {direction, windowSec, contact}
 export function makeWebProvider({ getStation, getPsk }) {
@@ -131,8 +90,9 @@ export function makeWebProvider({ getStation, getPsk }) {
   const aurora = makeAuroraCache({ url: "https://services.swpc.noaa.gov/json/ovation_aurora_latest.json", refreshMs: 10 * 60000 });
   const sats = makeSatsCache({ url: "https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=tle", refreshMs: 4 * 3600000, watchlist: SAT_WATCHLIST });
 
-  // DX spots (SpotHole) + SSN (DSD) + PSK (JSONP): simple hand-rolled caches.
-  let spots = [], ssn = [], psk = { updated: null, reports: [] };
+  const psk = makePskJsonpCache({ getStation, getPsk });
+  // DX spots (SpotHole) + SSN (DSD): simple hand-rolled caches.
+  let spots = [], ssn = [];
   async function refreshSpots() {
     try {
       const r = await fetch("https://spothole.app/api/v1/spots?limit=40", { signal: AbortSignal.timeout(15000) });
@@ -147,34 +107,20 @@ export function makeWebProvider({ getStation, getPsk }) {
       if (v.length) ssn = v;
     } catch { /* keep last good */ }
   }
-  async function refreshPsk() {
-    try {
-      const p = getPsk(), me = getStation().call;
-      if (!me || me === "N0CALL") return;
-      const who = p.direction === "receiver" ? "receiverCallsign" : "senderCallsign";
-      const url = "https://retrieve.pskreporter.info/query?" + who + "=" + encodeURIComponent(me)
-        + "&flowStartSeconds=-" + Math.floor(p.windowSec || 1800) + "&rronly=1"
-        + (p.contact ? "&appcontact=" + encodeURIComponent(p.contact) : "");
-      const json = await jsonp(url);
-      psk = { updated: new Date().toISOString(), reports: mapPskJson(json, { direction: p.direction || "sender" }) };
-    } catch { /* keep last good */ }
-  }
-
   let timers = [];
   function start() {
     [spacewx, weather, muf, fof2, drap, aurora, sats].forEach((c) => c.refresh());
-    refreshSpots(); refreshSsn(); refreshPsk();
+    refreshSpots(); refreshSsn(); psk.start();
     timers = [
       setInterval(refreshSpots, 3 * 60000),
       setInterval(refreshSsn, 60 * 60000),
-      setInterval(refreshPsk, PSK_MIN_MS),
     ];
   }
 
   return {
     start,
-    stop() { timers.forEach(clearInterval); [spacewx, weather, muf, fof2, drap, aurora, sats].forEach((c) => c.stop()); },
-    refreshPsk,                                     // settings changes want an immediate re-query
+    stop() { timers.forEach(clearInterval); psk.stop(); [spacewx, weather, muf, fof2, drap, aurora, sats].forEach((c) => c.stop()); },
+    refreshPsk: () => psk.refresh(),                // settings changes want an immediate re-query
     data() {
       return {
         solar: { bands: {}, updated: null },        // hamqsl XML has no CORS; bands tile uses their embed image
@@ -186,8 +132,8 @@ export function makeWebProvider({ getStation, getPsk }) {
       };
     },
     layers() {
-      return { sats: sats.get(), muf: muf.get(), drap: drap.get(), psk: psk, aurora: aurora.get(), fof2: fof2.get() };
+      return { sats: sats.get(), muf: muf.get(), drap: drap.get(), psk: psk.get(), aurora: aurora.get(), fof2: fof2.get() };
     },
-    mode() { return (psk.reports[0] && psk.reports[0].mode) || null; },
+    mode() { const r = psk.get().reports; return (r[0] && r[0].mode) || null; },
   };
 }

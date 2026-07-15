@@ -3,6 +3,7 @@ import { listOverlays, drawOverlay, overlayPanel, ATTRIBUTIONS } from "./hc-over
 import { drawTile, listTiles, TILE_W, TILE_H } from "./hc-tiles.js";
 import { azimuthal, azimuthalInverse, gridToLatLon } from "./geo.js";
 import { makeGlobe3D, makeProjector } from "./hc-globe3d.js";
+import { makePskJsonpCache } from "./hc-psk.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 // Standalone (HamClock Web): a static build served from GitHub Pages with no local
@@ -231,6 +232,7 @@ function toggleLock(id) {
 function rcFor(W, H) {
   return {
     W, H, project, data, layers, station: data.station, now: new Date(), satlib, bounds,
+    pskColorBy: pskColorBy(), pskDirection: webPsk().direction,
     moonTex: moonReady ? moonTex : null,   // reuse the same loaded Image the moon tile uses
   };
 }
@@ -445,13 +447,52 @@ function renderView() {
   const el = $("hcView"); if (!el) return;
   el.innerHTML =
     `<button class="hcChip${settingsOpen ? " on" : ""}" data-view="settings" data-info="Settings: show/hide cards, map overlays, and the Sun image.">&#9881; SETTINGS</button>`
+    + `<button class="hcChip${aboutOpen ? " on" : ""}" data-view="about" data-info="What everything on this page means, and how to set it up.">&#9432; ABOUT</button>`
     + (effectiveProj() === "azimuthal"
       ? `<button class="hcChip${globeSpin ? " on" : ""}" data-view="spin" data-info="Slowly auto-rotate the globe. Grab it with the mouse to steer; release to keep spinning from there.">${globeSpin ? "&#9210; SPINNING" : "&#8635; SPIN"}</button>`
         + (!globeHome() ? `<button class="hcChip" data-view="home" data-info="Re-center the globe on your station.">&#8962; HOME</button>` : "")
       : "")
     + (mapZoom > 1.01 ? `<button class="hcChip" data-view="reset" data-info="Reset the map zoom and pan.">RESET ${mapZoom.toFixed(1)}&times;</button>` : "");
 }
-let settingsOpen = false;
+let settingsOpen = false, aboutOpen = false;
+function renderAbout() {
+  const el = $("hcAbout"); if (!el) return;
+  el.style.display = aboutOpen ? "block" : "none";
+  if (!aboutOpen) return;
+  const sec = (title, html) => `<div class="hcSetSec"><h4>${title}</h4><div class="hcAboutBody">${html}</div></div>`;
+  el.innerHTML =
+    `<div class="hcSetHead"><span>About HamClock${STANDALONE ? " Web" : ""}</span><button class="hcSetX" data-view="about" title="close">&times;</button></div>`
+    + sec("What is this?",
+      `A ham-shack clock and propagation dashboard: live space weather, DX activity, and where <em>your</em> signal is landing — on a world map or a 3D globe. `
+      + `Inspired by <b>HamClock</b> by Elwood Downey, WB0OEW (SK) — an independent, from-scratch implementation carrying the idea forward.`
+      + (STANDALONE ? ` It runs 100% in your browser: no install, no server, no account. Your settings stay in this browser only.` : ""))
+    + sec("Quick start",
+      `<b>1.</b> Open <b>&#9881; Settings</b> and enter your <b>callsign</b> and 4&ndash;6 character <b>grid square</b> (e.g. EM78). Your grid drives the map center, weather, and sunrise/sunset.<br>`
+      + `<b>2.</b> Pick your map: LINE / TERRAIN / DAY-NITE / SATELLITE (yesterday's real clouds from NASA), and FLAT vs GLOBE (a real 3D globe &mdash; drag to spin, SPIN to auto-rotate, HOME to re-center).<br>`
+      + `<b>3.</b> Turn on the overlays you like. That's it &mdash; everything refreshes itself.`)
+    + sec("The PSK Reporter layer (your signal!)",
+      `The glowing lines are <b>real reception reports</b> from the PSK Reporter network.<br>`
+      + `&bull; <b>Who hears me</b> &mdash; receivers that actually decoded <em>your</em> transmissions (FT8, VarAC, etc.). This is measured propagation from your antenna.<br>`
+      + `&bull; <b>What I hear</b> &mdash; stations your own monitor reported hearing.<br>`
+      + `&bull; <b>Window</b>: how far back to look (15 min to 24 h). Long windows show your whole day's reach.<br>`
+      + `&bull; <b>Colors</b>: by band (matches the Paths legend), by mode (FT8, FT4, VARA, SSTV, CW&hellip;), or mono.<br>`
+      + `&bull; The <b>MODE</b> readout in the header is the mode of your newest report &mdash; transmit for a couple of minutes and it appears. Queries respect pskreporter.info's 5-minute rule; adding your email in settings is good etiquette.`)
+    + sec("Overlays",
+      `<b>Paths</b>: DX cluster spots (stations active worldwide) drawn as great circles from your QTH &mdash; the bearing you'd use to work them, colored by band. `
+      + `<b>Grayline</b>: the day/night terminator, where HF often peaks. <b>MUF / foF2</b>: ionosphere ceilings (KC2G). <b>DRAP</b>: solar X-ray absorption. `
+      + `<b>Aurora</b>: NOAA's oval nowcast. <b>Sats</b>: amateur satellites + next pass. <b>Moon</b>: sub-lunar point, az/el for EME. <b>Beacons</b>: the 18 NCDXF beacons, live slots. `
+      + `<b>Borders</b> and <b>City Lights</b> dress any basemap.<br>`
+      + `<b>AUTO</b> cycles your enabled overlays; the <b>&#128274; lock</b> beside each one pins it on while the rest rotate.`)
+    + sec("Cards",
+      `The top row: sunspots + solar flux (higher = better HF), Kp (5+ = geomagnetic storm), GOES X-ray (M/X flares = daytime blackouts), `
+      + `band conditions, live Sun imagery (pick a wavelength in settings), weather at your QTH, NCDXF beacon schedule, Moon, and live PSK spot counts. `
+      + `Drag cards to reorder; double-click to hide; the settings panel restores them.`)
+    + sec("Data sources",
+      `DX: SpotHole &middot; Space wx: NOAA SWPC &middot; MUF/foF2: KC2G &middot; RX reports: PSKReporter.info &middot; TLEs: CelesTrak &middot; `
+      + `WX: open-meteo &middot; Band conditions: hamqsl.com (N0NBH) &middot; Sun: NASA SDO &middot; Satellite map: NASA GIBS &middot; Basemaps: NASA Blue/Black Marble &middot; Borders: Natural Earth.`
+      + (STANDALONE ? `<br>Privacy: static page; your callsign/grid live in this browser and are only sent to the services above on your behalf.` : ""))
+    + `<div class="hcSetSec"><div class="hcAboutBody" style="color:#6b7a99">73 &mdash; and thank you, Elwood. <b>W4EWB</b></div></div>`;
+}
 function renderSettings() {
   const el = $("hcSettings"); if (!el) return;
   el.style.display = settingsOpen ? "block" : "none";
@@ -477,18 +518,20 @@ function renderSettings() {
       + `<input class="hcSetInput" data-grid type="text" maxlength="6" placeholder="EM78" value="${esc(lsGet("hcGrid", ""))}">`
       + `<div class="hcSetHint">${st.grid} &rarr; ${st.lat.toFixed(2)}, ${st.lon.toFixed(2)} &middot; drives map, weather, sun times</div>`
     : "";
-  const pskCfg = webPsk();
-  const pskSec = STANDALONE
-    ? `<div class="hcSetSec"><h4>PSK Reporter</h4>`
-      + `<div class="hcSetLbl">Direction</div><div class="hcSetChips">`
-        + `<button class="hcSetOpt${pskCfg.direction === "sender" ? " on" : ""}" data-pskdir="sender">Who hears me</button>`
-        + `<button class="hcSetOpt${pskCfg.direction === "receiver" ? " on" : ""}" data-pskdir="receiver">What I hear</button></div>`
-      + `<div class="hcSetLbl">Window</div><div class="hcSetChips">`
-        + [15, 30, 60].map((m) => `<button class="hcSetOpt${pskCfg.windowSec === m * 60 ? " on" : ""}" data-pskmin="${m}">${m}m</button>`).join("") + `</div>`
-      + `<div class="hcSetLbl">Contact email (PSKReporter etiquette)</div>`
-      + `<input class="hcSetInput hcSetUrl" data-pskmail type="text" maxlength="80" placeholder="you@example.com" value="${esc(lsGet("hcPskContact", ""))}">`
-      + `</div>`
-    : "";
+  const pskCfg = webPsk(), pskCol = pskColorBy();
+  const pskSec = `<div class="hcSetSec"><h4>PSK Reporter</h4>`
+    + `<div class="hcSetLbl">Direction</div><div class="hcSetChips">`
+      + `<button class="hcSetOpt${pskCfg.direction === "sender" ? " on" : ""}" data-pskdir="sender">Who hears me</button>`
+      + `<button class="hcSetOpt${pskCfg.direction === "receiver" ? " on" : ""}" data-pskdir="receiver">What I hear</button></div>`
+    + `<div class="hcSetLbl">Window</div><div class="hcSetChips">`
+      + [[15, "15m"], [30, "30m"], [60, "1h"], [360, "6h"], [1440, "24h"]].map(([m, l]) =>
+          `<button class="hcSetOpt${pskCfg.windowSec === m * 60 ? " on" : ""}" data-pskmin="${m}">${l}</button>`).join("") + `</div>`
+    + `<div class="hcSetLbl">Color lines by</div><div class="hcSetChips">`
+      + [["band", "Band"], ["mode", "Mode"], ["mono", "Mono"]].map(([v, l]) =>
+          `<button class="hcSetOpt${pskCol === v ? " on" : ""}" data-pskcolor="${v}">${l}</button>`).join("") + `</div>`
+    + `<div class="hcSetLbl">Contact email (PSKReporter etiquette)</div>`
+    + `<input class="hcSetInput hcSetUrl" data-pskmail type="text" maxlength="80" placeholder="you@example.com" value="${esc(lsGet("hcPskContact", ""))}">`
+    + `</div>`;
   el.innerHTML =
     `<div class="hcSetHead"><span>Settings</span><button class="hcSetX" data-view="settings" title="close">&times;</button></div>`
     + `<div class="hcSetSec"><h4>${STANDALONE ? "Station" : "Display"}</h4>`
@@ -962,10 +1005,21 @@ function webStation() {
 function webPsk() {
   return {
     direction: lsGet("hcPskDir", "sender") === "receiver" ? "receiver" : "sender",
-    windowSec: Math.max(900, Math.min(3600, (+lsGet("hcPskMin", 30) || 30) * 60)),
-    contact: lsGet("hcPskContact", "").trim(),
+    windowSec: Math.max(900, Math.min(86400, (+lsGet("hcPskMin", 30) || 30) * 60)),
+    // kiosk falls back to the server-configured operator email (data.ui.pskContact)
+    contact: lsGet("hcPskContact", "").trim() || data.ui?.pskContact || "",
   };
 }
+const pskColorBy = () => { const v = lsGet("hcPskColor", "band"); return ["band", "mode", "mono"].includes(v) ? v : "band"; };
+// PSK reports are fetched client-side on BOTH builds (JSONP works from any origin),
+// so the settings (direction / window / colors) work on the kiosk too. The web
+// provider owns its own cache; the kiosk uses this one.
+let kioskPsk = null;
+function kioskPskCache() {
+  if (!kioskPsk) { kioskPsk = makePskJsonpCache({ getStation: () => data.station, getPsk: webPsk }); kioskPsk.start(); }
+  return kioskPsk;
+}
+function refreshPskNow() { if (STANDALONE) webProv?.refreshPsk?.(); else kioskPsk?.refresh?.(); }
 let webProv = null;
 async function webProvider() {
   if (!webProv) {
@@ -997,6 +1051,7 @@ async function pullLayers() {
     else {
       const r = await fetch("/api/hamclock/layers");
       if (r.ok) layers = await r.json();
+      layers.psk = kioskPskCache().get();   // psk is client-side everywhere (settings-aware)
     }
   } catch { /* keep last layers */ }
   renderContext(); drawMap(); renderTiles();
@@ -1039,6 +1094,7 @@ async function init() {
     }
     const v = e.target.closest("[data-view]")?.dataset?.view; if (!v) return;
     if (v === "settings") { settingsOpen = !settingsOpen; renderView(); renderSettings(); }
+    else if (v === "about") { aboutOpen = !aboutOpen; renderView(); renderAbout(); }
     else if (v === "restoretiles") { hiddenTiles = new Set(); persistHiddenTiles(); renderView(); renderTiles(); }
     else if (v === "cardmenu") { cardMenuOpen = !cardMenuOpen; renderView(); }
     else if (v === "cards") { noCards = !noCards; try { localStorage.setItem("hcNoCards", noCards ? "1" : "0"); } catch { /* ignore */ } applyView(); renderView(); requestAnimationFrame(() => { drawMap(); renderTiles(); }); }
@@ -1058,8 +1114,9 @@ async function init() {
     if (d.lock != null) { toggleLock(d.lock); renderSettings(); return; }
     if (d.id != null) { onChipClick({ target: btn }); renderSettings(); return; }
     if (d.sun != null) { setSunView(d.sun); renderSettings(); return; }
-    if (d.pskdir != null) { lsSet("hcPskDir", d.pskdir); webProv?.refreshPsk?.(); renderSettings(); return; }
-    if (d.pskmin != null) { lsSet("hcPskMin", d.pskmin); webProv?.refreshPsk?.(); renderSettings(); return; }
+    if (d.pskdir != null) { lsSet("hcPskDir", d.pskdir); refreshPskNow(); renderSettings(); return; }
+    if (d.pskmin != null) { lsSet("hcPskMin", d.pskmin); refreshPskNow(); renderSettings(); return; }
+    if (d.pskcolor != null) { lsSet("hcPskColor", d.pskcolor); renderSettings(); syncUi(); return; }
     if (d.time != null) { timeFmt = d.time === "12" ? "12" : "24"; lsSet("hcTimeFmt", timeFmt); tickClocks(); renderSettings(); return; }
     if (d.auto != null) { autoSec = Math.max(3, Math.min(120, +d.auto || 15)); lsSet("hcAutoSec", String(autoSec)); scheduleAuto(); renderSettings(); return; }
     if (d.spin != null) { spinRate = Math.max(0.2, Math.min(4, +d.spin || 1)); lsSet("hcSpinRate", String(spinRate)); renderSettings(); return; }
@@ -1079,6 +1136,10 @@ async function init() {
     else if (t.matches("[data-grid]")) lsSet("hcGrid", t.value.trim().toUpperCase());
     else if (t.matches("[data-sstvurl]")) { lsSet("hcSstvUrl", t.value.trim()); loadSstv(); renderTiles(); }
     else if (t.matches("[data-pskmail]")) lsSet("hcPskContact", t.value.trim());
+  });
+  renderAbout();
+  $("hcAbout").addEventListener("click", (e) => {
+    if (e.target.closest('[data-view="about"]')) { aboutOpen = false; renderAbout(); renderView(); }
   });
   // Standalone: call/grid feed live queries (PSK, weather URL); a committed edit
   // (blur/Enter) reloads so every cache rebuilds against the new station cleanly.

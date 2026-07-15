@@ -9,6 +9,7 @@ import { moonPosition, moonPhase, moonLookAngles, moonRiseSet } from "./astro-mo
 import { drawMoon as drawMoonTexture, sunEquatorial, brightLimbAngle } from "./hc-moon.js";
 import { subPoint, footprintRadiusDeg, nextPasses, lookAngles, dopplerHz } from "./sat-passes.js";
 import { activeBeacons, allBeacons } from "./beacons.js";
+import { bandOfHz, modeColor } from "./hc-psk.js";
 
 const RAD = Math.PI / 180, DEG = 180 / Math.PI;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -330,30 +331,63 @@ function moonPanel(rc) {
 }
 
 // ---- psk: who is hearing us — teal dots at receiver grids + faint DE->rx arcs ----
+const hexA = (hex, a) => {   // "#rrggbb" -> "rgba(r,g,b,a)"
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+};
+function pskReportColor(r, colorBy) {
+  if (colorBy === "mode") return modeColor(r.mode);
+  if (colorBy === "mono") return "#40e0d0";
+  return bandColor(bandOfHz(r.freqHz));               // default: band (matches the Paths legend)
+}
 function drawPsk(ctx, rc) {
   const { W, H, project, layers, station } = rc;
   const deLat = Number(station.lat), deLon = Number(station.lon);
-  ctx.lineWidth = 0.8;
+  const colorBy = rc.pskColorBy || "band";
+  ctx.save();
+  ctx.lineWidth = 1.1;
   for (const r of layers.psk?.reports || []) {
     const ll = gridToLatLon(r.rxGrid);
     if (!ll) continue;
-    ctx.strokeStyle = "rgba(64,224,208,0.35)";
+    const col = pskReportColor(r, colorBy);
+    ctx.shadowColor = col; ctx.shadowBlur = 9;        // the glow
+    ctx.strokeStyle = hexA(col, 0.55);
     strokeSegments(ctx, greatCircle(deLat, deLon, ll.lat, ll.lon, 48), project, W, H);
     const p = project(ll.lon, ll.lat, W, H);
-    ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, 2 * Math.PI); ctx.fillStyle = "#40e0d0"; ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3.2, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 1.3, 0, 2 * Math.PI); ctx.fillStyle = "#fff"; ctx.fill();  // hot core
   }
+  ctx.restore();
 }
 
 function pskPanel(rc) {
   const attr = `<p class="hcAttr">${esc(ATTRIBUTIONS.psk)}</p>`;
   const reps = rc.layers.psk?.reports || [];
-  if (!reps.length) return `<p class="hcMuted">no one hearing ${esc(rc.station.call)} in the window</p>` + attr;
+  const who = rc.pskDirection === "receiver" ? `heard by ${esc(rc.station.call)}` : `hearing ${esc(rc.station.call)}`;
+  if (!reps.length) return `<p class="hcMuted">no stations ${who} in the window</p>` + attr;
+  const colorBy = rc.pskColorBy || "band";
+  // legend: counts per band or mode, swatches matching the map
+  let legend = "";
+  if (colorBy !== "mono") {
+    const counts = new Map();
+    for (const r of reps) {
+      const k = colorBy === "mode" ? (String(r.mode || "?").toUpperCase()) : (bandOfHz(r.freqHz) || "?");
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    legend = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => {
+      const col = colorBy === "mode" ? modeColor(k) : bandColor(k);
+      return `<div class="hcKv"><span><span style="display:inline-block;width:11px;height:11px;border-radius:2px;background:${col};margin-right:7px;vertical-align:-1px"></span>${esc(k)}</span><b>${n}</b></div>`;
+    }).join("");
+  }
   const nowS = rc.now.getTime() / 1000;
-  return reps.slice(0, 12).map((r) => {
+  const rows = reps.slice(0, 10).map((r) => {
     const age = Math.max(0, Math.round((nowS - r.epoch) / 60));
     const snr = Number.isFinite(r.snr) ? `${r.snr} dB` : "";
-    return `<div class="hcSpot"><b>${esc(r.rxCall)}</b> <span class="hcBand">${(Number(r.freqHz) / 1e6).toFixed(3)}</span> <span class="hcCty">${esc(r.mode)} ${esc(snr)}</span> <span class="hcT">${age}m</span></div>`;
-  }).join("") + attr;
+    const ageTxt = age >= 90 ? `${Math.round(age / 60)}h` : `${age}m`;
+    return `<div class="hcSpot"><b>${esc(r.rxCall)}</b> <span class="hcBand">${(Number(r.freqHz) / 1e6).toFixed(3)}</span> <span class="hcCty">${esc(r.mode)} ${esc(snr)}</span> <span class="hcT">${ageTxt}</span></div>`;
+  }).join("");
+  return legend + rows + attr;
 }
 
 // ---- beacons: NCDXF/IARU network -- all 18 plotted, the 5 transmitting now highlighted ----

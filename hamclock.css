@@ -198,6 +198,18 @@ body {
 .hcSetInput:focus { outline:none; border-color:#2c5c2c; background:#10231a; }
 .hcSetUrl { text-transform:none; letter-spacing:0; font-size:11px; text-align:left; color:#8ea0bd; }
 .hcSetHint { font-size:10px; color:#3a4a63; margin:4px 0 0; font-family:inherit; }
+/* ---- About panel (shares the settings chrome, centered + wider) ---- */
+#hcAbout {
+  position:absolute; top:50px; left:50%; transform:translateX(-50%); z-index:7; display:none;
+  width:min(560px, 92%); max-height:calc(100% - 70px); overflow-y:auto;
+  background:rgba(6,10,20,.97); border:1px solid #2a3960; border-radius:8px;
+  box-shadow:0 12px 40px rgba(0,0,0,.6); color:#c9d6ee;
+  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+}
+#hcAbout .hcSetHead { font-size:13px; }
+.hcAboutBody { font-size:12px; line-height:1.55; color:#9fb0c8; }
+.hcAboutBody b { color:#7dd87d; font-weight:600; }
+.hcAboutBody em { color:#e8a33d; font-style:normal; }
 .hcSetOpt {
   font-family:inherit; font-size:11.5px; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   background:#0e1626; color:#8ea0bd; border:1px solid #1c2740; border-radius:6px; padding:6px 9px; cursor:pointer;
