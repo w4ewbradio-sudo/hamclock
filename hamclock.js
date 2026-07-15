@@ -1020,14 +1020,20 @@ function kioskPskCache() {
   return kioskPsk;
 }
 function refreshPskNow() { if (STANDALONE) webProv?.refreshPsk?.(); else kioskPsk?.refresh?.(); }
-let webProv = null;
-async function webProvider() {
-  if (!webProv) {
-    const mod = await import("./hc-data-web.js");
-    webProv = mod.makeWebProvider({ getStation: webStation, getPsk: webPsk });
-    webProv.start();
+// Memoize the PROMISE, not the instance: pull()/pullLayers()/pullMode() all call
+// this concurrently at boot, and instance-memoization raced - three providers got
+// built, tripling every upstream query (incl. 3x heavy PSK fetches per page load,
+// which is exactly what trips pskreporter's soft-throttle).
+let webProv = null, webProvP = null;
+function webProvider() {
+  if (!webProvP) {
+    webProvP = import("./hc-data-web.js").then((mod) => {
+      webProv = mod.makeWebProvider({ getStation: webStation, getPsk: webPsk });
+      webProv.start();
+      return webProv;
+    });
   }
-  return webProv;
+  return webProvP;
 }
 
 async function pull() {
