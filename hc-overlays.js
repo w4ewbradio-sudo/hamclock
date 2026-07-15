@@ -362,7 +362,11 @@ function drawPsk(ctx, rc) {
 }
 
 function pskPanel(rc) {
-  const attr = `<p class="hcAttr">${esc(ATTRIBUTIONS.psk)}</p>`;
+  const st = rc.layers.psk?.status;
+  const statusLine = st && st.at
+    ? `<p class="hcAttr">checked ${esc(String(st.at).slice(11, 19))}Z &middot; ${esc(st.note || "")}</p>`
+    : "";
+  const attr = statusLine + `<p class="hcAttr">${esc(ATTRIBUTIONS.psk)}</p>`;
   const reps = rc.layers.psk?.reports || [];
   const who = rc.pskDirection === "receiver" ? `heard by ${esc(rc.station.call)}` : `hearing ${esc(rc.station.call)}`;
   if (!reps.length) return `<p class="hcMuted">no stations ${who} in the window</p>` + attr;

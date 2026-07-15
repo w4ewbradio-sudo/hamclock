@@ -84,6 +84,7 @@ const lsSave = (v) => { try { localStorage.setItem(LS_KEY, JSON.stringify(v)); }
 
 export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
   let data = { updated: null, reports: [] };
+  let status = { at: null, note: "starting" };   // last-query outcome, shown in the panel
   let timer = null, lastRun = 0, emptyStreak = 0, lastKey = null;
   // Persist last-good reports across page reloads: the display fills instantly,
   // and a reload inside the 5-minute gap does NOT re-query (burst protection -
@@ -97,8 +98,11 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
     try {
       const p = getPsk();
       const me = String(getStation()?.call || "").trim().toUpperCase();
-      if (!me || me === "N0CALL") return;               // unconfigured: zero upstream traffic
-      const windowSec = Math.floor(p.windowSec || 1800);
+      if (!me || me === "N0CALL") { status = { at: new Date().toISOString(), note: "no callsign set" }; return; }
+      // Cap just under 24h: pskreporter rejects windows "more than 24 hours" in the
+      // past, and an exact -86400 can land over the line by the time it's processed
+      // (the rejection has no JSONP wrapper, so it looks like a silent timeout).
+      const windowSec = Math.min(86000, Math.floor(p.windowSec || 1800));
       // Big windows (6h/24h) are heavier queries: back off to 15-minute re-polls.
       const gap = windowSec >= 21600 ? 15 * 60000 : Math.max(minMs, MIN_MS);
       if (Date.now() - lastRun < (force ? 15000 : gap - 5000)) return;  // settings-driven refreshes floor at 15s
@@ -116,14 +120,21 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
       // itself changed (direction/window/call): then the new answer is authoritative.
       const key = me + "|" + p.direction + "|" + windowSec;
       const queryChanged = key !== lastKey; lastKey = key;
-      if (!queryChanged && !reports.length && data.reports.length && emptyStreak < 1) { emptyStreak++; return; }
+      if (!queryChanged && !reports.length && data.reports.length && emptyStreak < 1) {
+        emptyStreak++;
+        status = { at: new Date().toISOString(), note: "empty answer held (throttle?)" };
+        return;
+      }
       emptyStreak = reports.length ? 0 : emptyStreak + 1;
       data = { updated: new Date().toISOString(), reports };
+      status = { at: data.updated, note: reports.length + " report" + (reports.length === 1 ? "" : "s") };
       lsSave({ at: lastRun, updated: data.updated, reports });
-    } catch { /* keep last good; retry next interval */ }
+    } catch {
+      status = { at: new Date().toISOString(), note: "no answer (timeout / throttled)" };
+    }
   }
   return {
-    get: () => data,
+    get: () => ({ ...data, status }),
     refresh: () => refresh(true),
     start() { refresh(false); timer = setInterval(() => refresh(false), Math.max(minMs, MIN_MS)); },
     stop() { if (timer) clearInterval(timer); },
