@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HamClock Web</title>
+<link rel="stylesheet" href="./hamclock.css">
+</head><body>
+<div id="hc">
+  <header id="hcTop">
+    <div class="hcCallBlock">
+      <div class="hcCall">N0CALL</div>
+      <div class="hcClocks">
+        <div class="hcUtc"><span id="hcUtc">--:--:--</span> <b>UTC</b></div>
+        <div class="hcUtcDate" id="hcUtcDate">--</div>
+        <div class="hcMjd" id="hcMjd">MJD --</div>
+        <div class="hcLocal"><span id="hcLocal">--:--:--</span> Local</div>
+      </div>
+      <div class="hcMode"><span class="hcModeK">Mode</span> <span id="hcModeV">—</span></div>
+    </div>
+    <div id="hcTiles"></div>
+  </header>
+  <main id="hcMain">
+    <div id="hcMapWrap">
+      <canvas id="hcMap"></canvas>
+      <div id="hcView"></div>
+      <div id="hcSettings"></div>
+      <div id="hcChips"></div>
+      <div id="hcMapCtl"></div>
+      <div id="hcDots"></div>
+      <div id="hcLegend"></div>
+    </div>
+    <aside id="hcSide">
+      <section class="hcPanel"><h2 id="hcDeTitle">DE</h2><div id="hcDe" class="hcBody">—</div></section>
+      <section class="hcPanel"><h2 id="hcCtxTitle">Overlay</h2><div id="hcCtx" class="hcBody">—</div></section>
+      <section class="hcPanel hcSpotsPanel"><h2>DX spots</h2><div id="hcSpots" class="hcBody">—</div></section>
+    </aside>
+  </main>
+  <footer id="hcFoot"><span id="hcUpdated">—</span> · DX: SpotHole · Solar: hamqsl · SpaceWX: NOAA SWPC · Sun: NASA/SDO · WX: open-meteo · Beacons: NCDXF/IARU</footer>
+</div>
+<script>window.HC_STANDALONE = 1;</script>
+<script src="./satellite.js"></script>
+<script type="module" src="./hamclock.js"></script>
+</body></html>
