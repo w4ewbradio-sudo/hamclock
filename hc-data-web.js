@@ -68,6 +68,21 @@ const SAT_WATCHLIST = [
   { name: "RS-44", norad: 44909 }, { name: "PO-101", norad: 43678 },
 ];
 
+// band-conditions.json is refreshed by the repo's hourly GitHub Action (which can
+// fetch hamqsl server-side, where CORS is a non-issue) and served same-origin, so
+// the standalone band tile can show the SAME parsed Good/Fair/Poor table as the
+// kiosk. Returns empty bands when the file is missing, malformed, or so stale the
+// Action likely broke - the tile then falls back to hamqsl's always-fresh GIF.
+export function parseBandConditions(json, { now = Date.now(), maxAgeMs = 12 * 3600000 } = {}) {
+  let j = json;
+  try { if (typeof json === "string") j = JSON.parse(json); } catch { return { bands: {}, updated: null }; }
+  const bands = j && typeof j === "object" ? j.bands : null;
+  if (!bands || typeof bands !== "object" || !Object.keys(bands).length) return { bands: {}, updated: null };
+  const at = Date.parse(j.fetchedAt || "");
+  if (Number.isFinite(at) && now - at > maxAgeMs) return { bands: {}, updated: j.updated || null };
+  return { bands, updated: j.updated || null };
+}
+
 // getStation() -> {call, grid, lat, lon}; getPsk() -> {direction, windowSec, contact}
 // onPskUpdate (optional): fired after every PSK query outcome so the page can
 // merge + redraw immediately instead of waiting for its next layers tick.
@@ -93,8 +108,15 @@ export function makeWebProvider({ getStation, getPsk, onPskUpdate = null }) {
   const sats = makeSatsCache({ url: "https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=tle", refreshMs: 4 * 3600000, watchlist: SAT_WATCHLIST });
 
   const psk = makePskJsonpCache({ getStation, getPsk, onUpdate: onPskUpdate });
-  // DX spots (SpotHole) + SSN (DSD): simple hand-rolled caches.
-  let spots = [], ssn = [];
+  // DX spots (SpotHole) + SSN (DSD) + band conditions (same-origin JSON): simple caches.
+  let spots = [], ssn = [], bandCond = { bands: {}, updated: null };
+  async function refreshBands() {
+    try {
+      // Cache-bust hourly: fresh enough without hammering the CDN every render.
+      const r = await fetch("./band-conditions.json?h=" + Math.floor(Date.now() / 3600000), { signal: AbortSignal.timeout(15000) });
+      if (r.ok) bandCond = parseBandConditions(await r.text());
+    } catch { /* keep last good; tile falls back to hamqsl's GIF */ }
+  }
   async function refreshSpots() {
     try {
       const r = await fetch("https://spothole.app/api/v1/spots?limit=40", { signal: AbortSignal.timeout(15000) });
@@ -112,10 +134,11 @@ export function makeWebProvider({ getStation, getPsk, onPskUpdate = null }) {
   let timers = [];
   function start() {
     [spacewx, weather, muf, fof2, drap, aurora, sats].forEach((c) => c.refresh());
-    refreshSpots(); refreshSsn(); psk.start();
+    refreshSpots(); refreshSsn(); refreshBands(); psk.start();
     timers = [
       setInterval(refreshSpots, 3 * 60000),
       setInterval(refreshSsn, 60 * 60000),
+      setInterval(refreshBands, 60 * 60000),
     ];
   }
 
@@ -125,7 +148,7 @@ export function makeWebProvider({ getStation, getPsk, onPskUpdate = null }) {
     refreshPsk: () => psk.refresh(),                // settings changes want an immediate re-query
     data() {
       return {
-        solar: { bands: {}, updated: null },        // hamqsl XML has no CORS; bands tile uses their embed image
+        solar: bandCond,                            // parsed hamqsl table via the hourly Action; {} -> tile shows the GIF
         spots,
         station: getStation(),
         spacewx: { ...spacewx.get(), ssn },

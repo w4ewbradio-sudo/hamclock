@@ -1,0 +1,22 @@
+{
+  "fetchedAt": "2026-07-16T13:47:04.184Z",
+  "updated": "16 Jul 2026 1347 GMT",
+  "bands": {
+    "80m-40m": {
+      "day": "Fair",
+      "night": "Good"
+    },
+    "30m-20m": {
+      "day": "Good",
+      "night": "Good"
+    },
+    "17m-15m": {
+      "day": "Fair",
+      "night": "Fair"
+    },
+    "12m-10m": {
+      "day": "Poor",
+      "night": "Poor"
+    }
+  }
+}

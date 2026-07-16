@@ -418,15 +418,19 @@ function persistHiddenTiles() {
   catch { /* storage unavailable -> session-only */ }
 }
 function tileData() {
+  const bands = data.solar?.bands || {};
+  const hasBands = Object.keys(bands).length > 0;   // web: real parsed table -> skip the GIF
   return {
     spacewx: data.spacewx, weather: data.weather, station: data.station,
-    bands: data.solar?.bands || {},
+    bands,
     now: new Date(),
     sunImg: sunReady ? sunImg : null,
     sunLabel: curSunView().short, sunAttr: curSunView().attr,
     moonTex: moonReady ? moonTex : null,
     sstvImg: sstvReady ? sstvImg : null,
-    bandsImg: STANDALONE && bandsReady ? bandsImg : null,
+    // Standalone falls back to hamqsl's live band-conditions GIF only until the
+    // parsed band-conditions.json (refreshed by the repo's hourly Action) arrives.
+    bandsImg: STANDALONE && bandsReady && !hasBands ? bandsImg : null,
     ssnAttr: STANDALONE ? "NOAA SWPC" : null,   // web SSN comes from NOAA daily indices, not SILSO
     psk: layers.psk?.reports || [],
   };
