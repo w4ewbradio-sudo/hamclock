@@ -5,7 +5,7 @@ import { azimuthal, azimuthalInverse, gridToLatLon } from "./geo.js";
 import { makeGlobe3D, makeProjector } from "./hc-globe3d.js";
 import { makePskJsonpCache } from "./hc-psk.js";
 import { completeSatDate } from "./hc-gibs.js";
-import { parseDomainRanges, lastTimes, unionTimes, nearestAtOrBefore, flipbookDates, goesUrl, viirsUrl } from "./hc-anim.js";
+import { parseDomainRanges, lastTimes, unionTimes, nearestAtOrBefore, flipbookDates, goesUrl, viirsUrl, footprintPoints, fadeAlpha, freshEnough, whiteFrac } from "./hc-anim.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 // Standalone (HamClock Web): a static build served from GitHub Pages with no local
@@ -143,9 +143,30 @@ async function refreshSatDate() {
 }
 
 // ---- satellite animation: CLOUDS (GOES 10-min loop) / DAYS (daily flipbook) ----
-const GOES_LAYERS = ["GOES-East_ABI_GeoColor", "GOES-West_ABI_GeoColor"];
+const GOES_LAYERS = [
+  { layer: "GOES-East_ABI_GeoColor", subLon: -75.2 },
+  { layer: "GOES-West_ABI_GeoColor", subLon: -137.2 },
+];
 const GOES_DOMAINS = (l) => `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/1.0.0/${l}/default/2km/-180,-90,180,90/all.xml`;
 const ANIM_FRAMES = 12, ANIM_W = 1024, ANIM_H = 512, FLIP_DAYS = 10;
+const FOOT_RADIUS = 77;      // deg - a few inside the 81.3 geometric limb, crops GOES's gray halo + yellow edge line
+// Earth-disk clip per satellite (equirect px), drawn at -360/0/+360 so the
+// GOES-West cap that crosses the antimeridian clips on both canvas edges.
+const footPaths = new Map();
+function footPath(subLon) {
+  if (!footPaths.has(subLon)) {
+    const p = new Path2D();
+    for (const off of [-360, 0, 360]) {
+      footprintPoints(subLon + off, FOOT_RADIUS, 120).forEach(([lon, lat], i) => {
+        const x = ((lon + 180) / 360) * ANIM_W, y = ((90 - lat) / 180) * ANIM_H;
+        if (i) p.lineTo(x, y); else p.moveTo(x, y);
+      });
+      p.closePath();
+    }
+    footPaths.set(subLon, p);
+  }
+  return footPaths.get(subLon);
+}
 const forcedAnim = new URLSearchParams(location.search).get("anim"); // debug/screenshots
 let animChoice = (() => { const v = localStorage.getItem("hcAnim"); return ["clouds", "days"].includes(v) ? v : ""; })();
 function animMode() {
@@ -154,7 +175,11 @@ function animMode() {
 }
 let animFrames = [];        // [{t, src}] src: canvas (clouds) or Image (days)
 let animIdx = 0, animKey = "", animTimer = null, animRefTimer = null;
-function animFrameImg() { return animFrames.length ? animFrames[Math.min(animIdx, animFrames.length - 1)].src : null; }
+let fadeSrc = null;         // days cross-fade composite (null = show the frame directly)
+function animFrameImg() {
+  if (!animFrames.length) return null;
+  return fadeSrc || animFrames[Math.min(animIdx, animFrames.length - 1)].src;
+}
 const loadImg = (url) => new Promise((res, rej) => {
   const im = new Image(); im.crossOrigin = "anonymous";
   im.onload = () => res(im); im.onerror = () => rej(new Error("img " + url));
@@ -164,15 +189,18 @@ async function buildCloudFrames() {
   // Per-layer valid times from DescribeDomains (gap-aware); frames = union of the
   // newest stamps; each sat draws its nearest frame <= t so a lagging sat holds
   // its newest picture while the fresher one keeps moving.
-  const domains = await Promise.all(GOES_LAYERS.map(async (l) => {
-    try { return lastTimes(parseDomainRanges(await (await fetch(GOES_DOMAINS(l), { cache: "no-store" })).text()), 72); }
+  const domains = (await Promise.all(GOES_LAYERS.map(async (l) => {
+    try { return lastTimes(parseDomainRanges(await (await fetch(GOES_DOMAINS(l.layer), { cache: "no-store" })).text()), 72); }
     catch { return []; }
-  }));
+  }))).map((times) => (freshEnough(times, Date.now(), 3 * 3600e3) ? times : []));  // stale feed -> exclude that sat
   const times = unionTimes(domains[0], domains[1], ANIM_FRAMES);
   if (!times.length || !satReady) return { key: animKey, frames: [] };
   const key = "clouds|" + times.join(",");
   if (key === animKey) return { key, frames: animFrames };   // nothing new - keep current canvases
   const frames = [];
+  const lastGood = [null, null];                        // per-sat fallback for broken frames
+  const probe = document.createElement("canvas"); probe.width = 128; probe.height = 64;
+  const probeCx = probe.getContext("2d", { willReadFrequently: true });
   for (const t of times) {                              // sequential: be gentle to GIBS
     const cv = document.createElement("canvas"); cv.width = ANIM_W; cv.height = ANIM_H;
     const cx = cv.getContext("2d");
@@ -180,7 +208,21 @@ async function buildCloudFrames() {
     for (let i = 0; i < GOES_LAYERS.length; i++) {
       const ft = nearestAtOrBefore(domains[i], t);
       if (!ft) continue;
-      try { cx.drawImage(await loadImg(goesUrl(GOES_LAYERS[i], ft, ANIM_W, ANIM_H)), 0, 0, ANIM_W, ANIM_H); } catch { /* hole stays base */ }
+      let img = null;
+      try { img = await loadImg(goesUrl(GOES_LAYERS[i].layer, ft, ANIM_W, ANIM_H)); } catch { /* keep lastGood */ }
+      if (img) {
+        // partially-ingested frames render their missing sector flat white:
+        // detect and fall back to this sat's previous good frame.
+        probeCx.clearRect(0, 0, 128, 64); probeCx.drawImage(img, 0, 0, 128, 64);
+        if (whiteFrac(probeCx.getImageData(0, 0, 128, 64).data) > 0.15) img = null;
+        else lastGood[i] = img;
+      }
+      const draw = img || lastGood[i];
+      if (!draw) continue;
+      // clip to the real earth disk: GOES frames carry opaque junk outside it
+      cx.save(); cx.clip(footPath(GOES_LAYERS[i].subLon));
+      cx.drawImage(draw, 0, 0, ANIM_W, ANIM_H);
+      cx.restore();
     }
     frames.push({ t, src: cv });
   }
@@ -210,6 +252,38 @@ function animTick() {
   animIdx = (animIdx + 1) % animFrames.length;
   drawMap();
 }
+// DAYS: slow, smooth flipbook - hold each day, then cross-fade to the next.
+// The fade composites into ping-pong canvases (ALTERNATING objects: the globe's
+// texture cache keys canvases by identity, so a mutated single canvas would
+// never re-upload).
+const DAY_TICK = 120, DAY_HOLD = 2600, DAY_FADE = 1200;
+let dayElapsed = 0, fadeCvs = null, fadeFlip = false;
+function animTickDays() {
+  if (!animMode() || animFrames.length < 2) return;
+  dayElapsed += DAY_TICK;
+  const a = fadeAlpha(dayElapsed, DAY_HOLD, DAY_FADE);
+  if (a === 0) return;                                   // holding: nothing to redraw
+  if (a >= 1) {                                          // fade done -> next day becomes current
+    animIdx = (animIdx + 1) % animFrames.length;
+    dayElapsed = 0; fadeSrc = null;
+    drawMap();
+    return;
+  }
+  if (!fadeCvs) {
+    fadeCvs = [0, 1].map(() => {
+      const c = document.createElement("canvas"); c.width = 2048; c.height = 1024; return c;
+    });
+  }
+  fadeFlip = !fadeFlip;
+  const cv = fadeCvs[fadeFlip ? 1 : 0], c2 = cv.getContext("2d");
+  const cur = animFrames[Math.min(animIdx, animFrames.length - 1)].src;
+  const nxt = animFrames[(animIdx + 1) % animFrames.length].src;
+  c2.globalAlpha = 1; c2.drawImage(cur, 0, 0, cv.width, cv.height);
+  c2.globalAlpha = a; c2.drawImage(nxt, 0, 0, cv.width, cv.height);
+  c2.globalAlpha = 1;
+  fadeSrc = cv;
+  drawMap();
+}
 let animRunMode = "";       // mode the timers below were started for
 function syncAnim() {
   // restart timers on ANY mode change (off<->on and clouds<->days); called from syncUi()
@@ -217,9 +291,10 @@ function syncAnim() {
   if (m === animRunMode) return;
   clearInterval(animTimer); clearInterval(animRefTimer);
   animTimer = animRefTimer = null; animFrames = []; animKey = ""; animIdx = 0;
+  dayElapsed = 0; fadeSrc = null;
   animRunMode = m;
   if (m) {
-    animTimer = setInterval(animTick, 300);
+    animTimer = m === "clouds" ? setInterval(animTick, 300) : setInterval(animTickDays, DAY_TICK);
     animRefTimer = setInterval(refreshAnimFrames, m === "clouds" ? 10 * 60000 : 3600 * 1000);
     refreshAnimFrames();
   }
@@ -683,7 +758,10 @@ function drawBase(ctx, W, H, style, sub) {
   if (style === "satellite") {
     const fr = animMode() ? animFrameImg() : null;
     ctx.drawImage(fr || worldSat, 0, 0, W, H);   // live loop frame, else static mosaic
-    if (!animMode()) drawNight(ctx, sub, W, H);  // GOES GeoColor already carries real day/night
+    // Night shading stays ON for static + CLOUDS (the VIIRS base outside the GOES
+    // discs is all-daylight, so shading keeps the day/night seam coherent);
+    // DAYS shows historical mosaics where today's terminator is meaningless.
+    if (animMode() !== "days") drawNight(ctx, sub, W, H);
     return;
   }
   if (style === "terrain") {

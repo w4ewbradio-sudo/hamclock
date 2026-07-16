@@ -40,6 +40,54 @@ export function flipbookDates(latestCompleteIso, count) {
   return out;
 }
 
+// Earth-disk footprint of a geostationary satellite: the cap of angular radius
+// `radiusDeg` around the sub-satellite point (on the equator). GOES GeoColor
+// imagery carries opaque junk outside the real disk (gray limb halo + a yellow
+// edge line), so composites must clip to this cap - a few degrees inside the
+// geometric limb (81.3 deg) to crop the fuzzy border. Longitudes are returned
+// CONTINUOUS around subLon (may exceed +-180): the equirect consumer draws the
+// polygon at x, x-W, x+W to cover antimeridian wrap.
+export function footprintPoints(subLonDeg, radiusDeg, steps = 90) {
+  const rad = Math.PI / 180, d = radiusDeg * rad;
+  const out = [];
+  for (let i = 0; i < steps; i++) {
+    const th = (i / steps) * 2 * Math.PI;               // bearing from north
+    const lat = Math.asin(Math.sin(d) * Math.cos(th));
+    const dLon = Math.atan2(Math.sin(th) * Math.sin(d), Math.cos(d));
+    out.push([subLonDeg + dLon / rad, lat / rad]);
+  }
+  return out;
+}
+
+// A geostationary layer is only worth animating if its NEWEST frame is recent:
+// a feed hours behind (GIBS's East ingest has stalled for 14h+ at a stretch)
+// contributes a frozen - and often partially-ingested - disc.
+export function freshEnough(times, nowMs, maxAgeMs) {
+  const newest = times && times.length ? times[times.length - 1] : null;
+  return !!newest && nowMs - Date.parse(newest) < maxAgeMs;
+}
+
+// Missing-sector detector: GIBS renders a partially-ingested GeoColor frame's
+// missing region as flat WHITE (with a yellow boundary). Real cloud fields are
+// textured and rarely saturate; a large opaque near-white fraction marks a
+// broken frame. Input is RGBA pixel data; returns white/opaque ratio.
+export function whiteFrac(rgba) {
+  let opaque = 0, white = 0;
+  for (let i = 0; i + 3 < rgba.length; i += 4) {
+    if (rgba[i + 3] < 200) continue;
+    opaque++;
+    if (rgba[i] >= 246 && rgba[i + 1] >= 246 && rgba[i + 2] >= 246) white++;
+  }
+  return opaque ? white / opaque : 0;
+}
+
+// Cross-fade timing for the DAYS flipbook: 0 through the hold window, then a
+// linear 0->1 ramp across the fade window, clamped at 1.
+export function fadeAlpha(elapsedMs, holdMs, fadeMs) {
+  if (elapsedMs <= holdMs) return 0;
+  return Math.min(1, (elapsedMs - holdMs) / fadeMs);
+}
+
 const WMS = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0&CRS=EPSG:4326&BBOX=-90,-180,90,180";
 export function goesUrl(layer, isoTime, w, h) {
   return `${WMS}&LAYERS=${layer}&WIDTH=${w}&HEIGHT=${h}&FORMAT=image/png&TRANSPARENT=TRUE&TIME=${isoTime}`;
