@@ -108,7 +108,16 @@ export function jsonp(url, timeoutMs = 20000) {
 
 const MIN_MS = 5 * 60 * 1000;
 
-// getStation() -> {call,...}; getPsk() -> {direction, windowSec, contact}
+// How long a spot stays on the map after it was last reported. Retaining spots
+// across polls is what stops the display from blanking during the things that
+// kept wiping it: pskreporter 503s / empty-throttle answers, brief quiet gaps,
+// and mode switches (VARAC beacon <-> FT8 receive). Honors a long window if set,
+// but always keeps at least 2h so a receive-only or between-beacons lull holds.
+function retentionMs(windowSec) {
+  return Math.min(Math.max((windowSec || 1800) * 1000, 2 * 3600000), 24 * 3600000);
+}
+
+// getStation() -> {call,...}; getPsk() -> {direction:"sender"|"receiver"|"both", windowSec, mode, band, contact}
 // Injectables (jsonpImpl/storage/nowFn/rand) exist for node:test; browser callers
 // pass none of them. onUpdate fires after EVERY query outcome so the page can
 // merge + redraw immediately instead of waiting for its next layers tick.
@@ -117,25 +126,43 @@ const LS_KEY = "hcPskCache1";
 export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImpl = jsonp, storage = null, nowFn = Date.now, rand = Math.random, onUpdate = null, forceFloorMs = 15000 }) {
   const store = () => storage || localStorage;    // resolved lazily; guarded by try/catch below
   const load = () => { try { return JSON.parse(store().getItem(LS_KEY)) || null; } catch { return null; } };
-  const save = () => { try { store().setItem(LS_KEY, JSON.stringify({ at: lastRun, updated: data.updated, reports: data.reports })); } catch { /* session-only */ } };
   const ping = () => { try { onUpdate && onUpdate(); } catch { /* ui hook must not kill the poll loop */ } };
   // Two page loads must never issue an identical query URL: pskreporter answers a
   // too-soon identical repeat with a throttle page (non-JSONP -> ORB-blocked in
   // Chrome). Shaving a random sliver off the window makes every load distinct.
   const jitterSec = Math.floor(rand() * 120);
-  let data = { updated: null, reports: [] };
+
+  // retained: one entry per (direction, remote call, mode, band); newest epoch wins.
+  // The map draws a line DE -> remote grid for each, so both directions coexist.
+  const retained = new Map();
+  const spotKey = (s) => s.dir + "|" + s.rxCall + "|" + s.mode + "|" + bandOfHz(s.freqHz);
+  const prune = (retMs, now) => { for (const [k, s] of retained) if (now - (s.epoch || 0) * 1000 > retMs) retained.delete(k); };
+  const list = (now, retMs) => [...retained.values()]
+    .filter((s) => now - (s.epoch || 0) * 1000 <= retMs)
+    .sort((a, b) => b.epoch - a.epoch).slice(0, 300);
+
+  let updated = null;
   let status = { at: null, note: "starting" };   // last-query outcome, shown in the panel
-  let timer = null, pendingT = null, lastRun = 0, emptyStreak = 0, lastKey = null;
-  // Persist last-good reports across page reloads: the display fills instantly,
-  // and a reload inside the 5-minute gap does NOT re-query (burst protection -
-  // pskreporter soft-throttles chatty IPs by returning EMPTY results).
+  let timer = null, pendingT = null, lastRun = 0, filterKey = null, lastRetMs = retentionMs(1800);
+  let pollDir = "sender";                          // alternates each poll when direction is "both"
+
+  const save = () => { try { store().setItem(LS_KEY, JSON.stringify({ at: lastRun, updated, filterKey, retained: [...retained.values()] })); } catch { /* session-only */ } };
+
+  // Restore last-good spots (aged) so a reload shows lines instantly, and a reload
+  // inside the 5-minute gap does NOT re-query (pskreporter soft-throttles chatty IPs).
+  // Restore filterKey too, so the first poll only clears when the SAVED filter
+  // differs from the current one - not just because filterKey started null.
   const saved = load();
-  if (saved && nowFn() - (saved.at || 0) < 24 * 3600 * 1000 && Array.isArray(saved.reports)) {
-    data = { updated: saved.updated || null, reports: saved.reports };
+  if (saved && Array.isArray(saved.retained) && nowFn() - (saved.at || 0) < 24 * 3600 * 1000) {
+    for (const s of saved.retained) if (s && s.rxCall) retained.set(spotKey(s), s);
+    prune(lastRetMs, nowFn());
+    updated = saved.updated || null;
     lastRun = saved.at || 0;
+    filterKey = saved.filterKey || null;
   }
+
   async function refresh(force) {
-    let windowSec = 0;      // hoisted: the catch's throttle note hints when a big window was the likely trigger
+    let windowSec = 0, retMs = lastRetMs;   // hoisted so the catch can still age + hint
     try {
       const p = getPsk();
       const me = String(getStation()?.call || "").trim().toUpperCase();
@@ -144,6 +171,17 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
       // past, and an exact -86400 can land over the line by the time it's processed
       // (the rejection has no JSONP wrapper, so it looks like a silent timeout).
       windowSec = Math.min(86000, Math.floor(p.windowSec || 1800));
+      retMs = lastRetMs = retentionMs(windowSec);
+
+      // A change to WHAT we ask (call/mode/band/direction) makes the retained set
+      // stale, so clear it and let the new filter repopulate authoritatively. A
+      // window-only change keeps the spots (retention is independent of the window).
+      // Guard on filterKey !== null so the first poll after a restore never wipes
+      // the spots we just loaded (that was the "lines vanish on load" bug).
+      const fk = me + "|" + (p.mode || "") + "|" + (p.band || "") + "|" + (p.direction || "sender");
+      if (filterKey !== null && fk !== filterKey) retained.clear();
+      filterKey = fk;
+
       // Big windows (6h/24h) are heavier queries: back off to 15-minute re-polls.
       const gap = windowSec >= 21600 ? 15 * 60000 : Math.max(minMs, MIN_MS);
       if (nowFn() - lastRun < (force ? forceFloorMs : gap - 5000)) {
@@ -157,44 +195,44 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
       }
       if (pendingT) { clearTimeout(pendingT); pendingT = null; }   // this run supersedes any deferred one
       lastRun = nowFn();
-      const who = p.direction === "receiver" ? "receiverCallsign" : "senderCallsign";
+
+      // "both" alternates the queried direction each poll (one query per poll keeps
+      // pskreporter's etiquette); retention keeps the other side visible in between,
+      // so you see lines whether W4EWB is transmitting OR receiving.
+      const dir = p.direction === "receiver" ? "receiver" : p.direction === "both" ? pollDir : "sender";
+      if (p.direction === "both") pollDir = pollDir === "sender" ? "receiver" : "sender";
+
+      const who = dir === "receiver" ? "receiverCallsign" : "senderCallsign";
       const url = "https://retrieve.pskreporter.info/query?" + who + "=" + encodeURIComponent(me)
         + "&flowStartSeconds=-" + (windowSec - jitterSec) + "&rronly=1"
         + (p.mode ? "&mode=" + encodeURIComponent(p.mode) : "")   // server-side mode filter
         + (p.contact ? "&appcontact=" + encodeURIComponent(p.contact) : "");
       const json = await jsonpImpl(url);
       const limit = windowSec >= 21600 ? 200 : 50;      // long windows plot more of the story
-      const reports = mapPskJson(json, { direction: p.direction || "sender", limit, band: p.band || "" });
-      // Soft-throttle defense: pskreporter answers a penalized IP with a VALID but
-      // EMPTY report list. Don't let one such answer wipe real data - only accept
-      // an empty result once two consecutive polls agree. EXCEPT when the query
-      // itself changed (direction/window/call): then the new answer is authoritative.
-      const key = me + "|" + p.direction + "|" + windowSec + "|" + (p.mode || "") + "|" + (p.band || "");
-      const queryChanged = key !== lastKey; lastKey = key;
-      if (!queryChanged && !reports.length && data.reports.length && emptyStreak < 1) {
-        emptyStreak++;
-        status = { at: new Date().toISOString(), note: "empty answer held (throttle?)" };
-        save(); ping();
-        return;
-      }
-      emptyStreak = reports.length ? 0 : emptyStreak + 1;
-      data = { updated: new Date().toISOString(), reports };
-      status = { at: data.updated, note: reports.length + " report" + (reports.length === 1 ? "" : "s") };
+      const fresh = mapPskJson(json, { direction: dir, limit, band: p.band || "" });
+      const now = nowFn();
+      for (const s of fresh) { s.dir = dir; retained.set(spotKey(s), s); }
+      prune(retMs, now);
+      updated = new Date().toISOString();
+      const shown = retained.size;
+      status = { at: updated, note: (fresh.length ? fresh.length + " new / " : "") + shown + " shown"
+        + (p.direction === "both" ? " (TX+RX)" : "") };
       save(); ping();
     } catch (e) {
+      // Never wipe on a throttle/timeout: keep the retained spots (aged) on the map.
+      prune(retMs, nowFn());
+      const blocked = /blocked/i.test(e && e.message || "");
       status = {
         at: new Date().toISOString(),
-        note: /blocked/i.test(e && e.message || "")
-          ? "throttled by pskreporter" + (windowSec >= 21600 ? " (6h/24h queries are often shed - try 1h)" : "")
-          : "no answer (timeout)",
+        note: (blocked ? "throttled" : "no answer")
+          + (retained.size ? " - showing last " + retained.size : "")
+          + (windowSec >= 21600 ? " (try 1h)" : ""),
       };
-      // Persist the attempt time too: a page reload right after a failure must not
-      // re-fire the query straight back into the throttle.
       save(); ping();
     }
   }
   return {
-    get: () => ({ ...data, status }),
+    get: () => ({ updated, reports: list(nowFn(), lastRetMs), status }),
     refresh: () => refresh(true),
     start() { refresh(false); timer = setInterval(() => refresh(false), Math.max(minMs, MIN_MS)); },
     stop() { if (timer) clearInterval(timer); if (pendingT) { clearTimeout(pendingT); pendingT = null; } },

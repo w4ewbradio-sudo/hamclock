@@ -384,12 +384,18 @@ function pskPanel(rc) {
   const attr = statusLine + `<p class="hcAttr">${esc(ATTRIBUTIONS.psk)}</p>`;
   const reps = rc.layers.psk?.reports || [];
   const filt = [rc.pskMode, rc.pskBand].filter(Boolean).map(esc).join(" &middot; ");
-  const who = (rc.pskDirection === "receiver" ? `heard by ${esc(rc.station.call)}` : `hearing ${esc(rc.station.call)}`)
-    + (filt ? ` (${filt})` : "");
-  // A mode/band pick with no recent activity blanks the map by design (the new
-  // filter's answer is authoritative) - say so, or it reads as a crash.
+  const call = esc(rc.station.call);
+  const who = (rc.pskDirection === "receiver" ? `heard by ${call}`
+    : rc.pskDirection === "both" ? `to/from ${call}`
+    : `hearing ${call}`) + (filt ? ` (${filt})` : "");
+  // Empty is a real state, not a crash: say why and what to do. In a single
+  // direction the usual cause is the station being in the opposite mode (not
+  // transmitting -> nobody hears you; not decoding -> you hear nobody), so point
+  // at "Both", which shows activity either way.
   if (!reps.length) {
-    const hint = filt ? `<p class="hcMuted">nothing matches the ${filt} filter yet - try a longer window or All</p>` : "";
+    let hint = "";
+    if (filt) hint = `<p class="hcMuted">nothing matches the ${filt} filter yet - try a longer window or All</p>`;
+    else if (rc.pskDirection !== "both") hint = `<p class="hcMuted">quiet in this direction - set Direction to Both to also show the other</p>`;
     return `<p class="hcMuted">no stations ${who} in the window</p>` + hint + attr;
   }
   const colorBy = rc.pskColorBy || "band";

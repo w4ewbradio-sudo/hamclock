@@ -458,7 +458,7 @@ const OVERLAY_INFO = {
   aurora: "Aurora nowcast (NOAA SWPC OVATION): green shading shows where the aurora is active right now — auroral absorption degrades HF near the poles, but the oval can also enable VHF aurora scatter.",
   sats: "Amateur satellites: current position and footprint circle. The side panel lists the next pass — or, when a bird is overhead now, its live elevation/azimuth and Doppler shift.",
   moon: "Plots the Moon on the map at its sub-lunar point; phase and az/el show in the side panel.",
-  psk: "PSK Reporter: who is hearing your station right now, plotted at the receivers' locations.",
+  psk: "PSK Reporter: stations hearing you and/or that you're hearing (set Direction in settings), plotted at the remote end. Spots linger a while so the map doesn't blank between transmissions.",
   beacons: "Plots all 18 NCDXF beacons on the map and highlights the ones transmitting now.",
   boundaries: "Political boundaries: country border lines (Natural Earth). Combines with any basemap — e.g. borders over the live satellite view.",
   citylights: "City Lights: NASA Black Marble night-lights glow on the dark side, over any basemap. Lock it on to keep it while Auto cycles.",
@@ -686,6 +686,7 @@ function renderSettings() {
   const pskCfg = webPsk(), pskCol = pskColorBy();
   const pskSec = `<div class="hcSetSec"><h4>PSK Reporter</h4>`
     + `<div class="hcSetLbl">Direction</div><div class="hcSetChips">`
+      + `<button class="hcSetOpt${pskCfg.direction === "both" ? " on" : ""}" data-pskdir="both">Both</button>`
       + `<button class="hcSetOpt${pskCfg.direction === "sender" ? " on" : ""}" data-pskdir="sender">Who hears me</button>`
       + `<button class="hcSetOpt${pskCfg.direction === "receiver" ? " on" : ""}" data-pskdir="receiver">What I hear</button></div>`
     + `<div class="hcSetLbl">Window</div><div class="hcSetChips">`
@@ -1187,9 +1188,12 @@ function webStation() {
   return { call, grid, lat, lon };
 }
 function webPsk() {
+  // "both" (default) shows activity whether the station is transmitting (who hears
+  // me) or receiving (what I hear), so the lines don't vanish when the mode changes.
+  const d = lsGet("hcPskDir", "both");
   return {
-    direction: lsGet("hcPskDir", "sender") === "receiver" ? "receiver" : "sender",
-    windowSec: Math.max(900, Math.min(86400, (+lsGet("hcPskMin", 30) || 30) * 60)),
+    direction: d === "receiver" ? "receiver" : d === "sender" ? "sender" : "both",
+    windowSec: Math.max(900, Math.min(86400, (+lsGet("hcPskMin", 60) || 60) * 60)),
     mode: lsGet("hcPskMode", ""),                     // "" = all modes (server-side query filter)
     band: lsGet("hcPskBand", ""),                     // "" = all bands (client-side filter)
     // kiosk falls back to the server-configured operator email (data.ui.pskContact)
