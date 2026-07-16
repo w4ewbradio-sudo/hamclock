@@ -368,7 +368,9 @@ function pskPanel(rc) {
     : "";
   const attr = statusLine + `<p class="hcAttr">${esc(ATTRIBUTIONS.psk)}</p>`;
   const reps = rc.layers.psk?.reports || [];
-  const who = rc.pskDirection === "receiver" ? `heard by ${esc(rc.station.call)}` : `hearing ${esc(rc.station.call)}`;
+  const filt = [rc.pskMode, rc.pskBand].filter(Boolean).map(esc).join(" &middot; ");
+  const who = (rc.pskDirection === "receiver" ? `heard by ${esc(rc.station.call)}` : `hearing ${esc(rc.station.call)}`)
+    + (filt ? ` (${filt})` : "");
   if (!reps.length) return `<p class="hcMuted">no stations ${who} in the window</p>` + attr;
   const colorBy = rc.pskColorBy || "band";
   // legend: counts per band or mode, swatches matching the map
@@ -391,7 +393,7 @@ function pskPanel(rc) {
     const ageTxt = age >= 90 ? `${Math.round(age / 60)}h` : `${age}m`;
     return `<div class="hcSpot"><b>${esc(r.rxCall)}</b> <span class="hcBand">${(Number(r.freqHz) / 1e6).toFixed(3)}</span> <span class="hcCty">${esc(r.mode)} ${esc(snr)}</span> <span class="hcT">${ageTxt}</span></div>`;
   }).join("");
-  return legend + rows + attr;
+  return (filt ? `<p class="hcAttr">filter: ${filt}</p>` : "") + legend + rows + attr;
 }
 
 // ---- beacons: NCDXF/IARU network -- all 18 plotted, the 5 transmitting now highlighted ----
