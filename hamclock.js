@@ -4,6 +4,7 @@ import { drawTile, listTiles, TILE_W, TILE_H } from "./hc-tiles.js";
 import { azimuthal, azimuthalInverse, gridToLatLon } from "./geo.js";
 import { makeGlobe3D, makeProjector } from "./hc-globe3d.js";
 import { makePskJsonpCache } from "./hc-psk.js";
+import { completeSatDate } from "./hc-gibs.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 // Standalone (HamClock Web): a static build served from GitHub Pages with no local
@@ -119,14 +120,13 @@ worldSat.onerror = () => { satReady = false; };   // GIBS unreachable -> Terrain
 // latest available date from its DescribeDomains feed (open CORS) and use that.
 let satDate = null;
 // NOAA-20 (JPSS-1) is healthier / more current than SNPP (whose feed had stalled
-// on a partial day). The domain's NEWEST date is today's still-filling composite
-// (western hemisphere not flown yet), so we step back one day to the last COMPLETE
-// full-globe mosaic.
+// on a partial day). completeSatDate steps back TWO days from the domain's newest:
+// the newest is today's still-filling composite AND even yesterday's keeps filling
+// for hours after the date rolls (seen live: a missing Pacific wedge at 00:30Z).
 const SAT_LAYER = "VIIRS_NOAA20_CorrectedReflectance_TrueColor";
 const SAT_DOMAINS = `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/1.0.0/${SAT_LAYER}/default/250m/-180,-90,180,90/all.xml`;
-function prevDay(iso) { const d = new Date(iso + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
 function gibsSatUrl() {
-  const iso = satDate || prevDay(new Date().toISOString().slice(0, 10));   // discovered latest-1, else clock-1
+  const iso = satDate || completeSatDate(new Date().toISOString().slice(0, 10));   // discovered latest-2, else clock-2
   return "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi?SERVICE=WMS&REQUEST=GetMap&VERSION=1.3.0"
     + "&LAYERS=" + SAT_LAYER + "&CRS=EPSG:4326&BBOX=-90,-180,90,180"
     + "&WIDTH=2048&HEIGHT=1024&FORMAT=image/jpeg&TIME=" + iso;
@@ -137,7 +137,7 @@ async function refreshSatDate() {
     const xml = await (await fetch(SAT_DOMAINS, { cache: "no-store" })).text();
     const dates = xml.match(/\d{4}-\d{2}-\d{2}/g);      // domain ends at today's (partial) date
     const latest = dates && dates[dates.length - 1];
-    if (latest) { const complete = prevDay(latest); if (complete !== satDate) { satDate = complete; loadSat(); } }
+    if (latest) { const complete = completeSatDate(latest); if (complete !== satDate) { satDate = complete; loadSat(); } }
   } catch { if (!satDate) loadSat(); }                  // offline: fall back to the clock-based guess
 }
 
@@ -230,9 +230,10 @@ function toggleLock(id) {
   persist(); syncUi();
 }
 function rcFor(W, H) {
+  const wp = webPsk();
   return {
     W, H, project, data, layers, station: data.station, now: new Date(), satlib, bounds,
-    pskColorBy: pskColorBy(), pskDirection: webPsk().direction,
+    pskColorBy: pskColorBy(), pskDirection: wp.direction, pskMode: wp.mode, pskBand: wp.band,
     moonTex: moonReady ? moonTex : null,   // reuse the same loaded Image the moon tile uses
   };
 }
@@ -526,6 +527,12 @@ function renderSettings() {
     + `<div class="hcSetLbl">Window</div><div class="hcSetChips">`
       + [[15, "15m"], [30, "30m"], [60, "1h"], [360, "6h"], [1440, "24h"]].map(([m, l]) =>
           `<button class="hcSetOpt${pskCfg.windowSec === m * 60 ? " on" : ""}" data-pskmin="${m}">${l}</button>`).join("") + `</div>`
+    + `<div class="hcSetLbl">Mode</div><div class="hcSetChips">`
+      + ["", "FT8", "FT4", "CW", "JS8", "VARAC", "WSPR", "SSTV", "RTTY", "PSK"].map((m) =>
+          `<button class="hcSetOpt${(pskCfg.mode || "") === m ? " on" : ""}" data-pskmode="${m}">${m || "All"}</button>`).join("") + `</div>`
+    + `<div class="hcSetLbl">Band</div><div class="hcSetChips">`
+      + ["", "160m", "80m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m", "2m"].map((b) =>
+          `<button class="hcSetOpt${(pskCfg.band || "") === b ? " on" : ""}" data-pskband="${b}">${b || "All"}</button>`).join("") + `</div>`
     + `<div class="hcSetLbl">Color lines by</div><div class="hcSetChips">`
       + [["band", "Band"], ["mode", "Mode"], ["mono", "Mono"]].map(([v, l]) =>
           `<button class="hcSetOpt${pskCol === v ? " on" : ""}" data-pskcolor="${v}">${l}</button>`).join("") + `</div>`
@@ -1006,6 +1013,8 @@ function webPsk() {
   return {
     direction: lsGet("hcPskDir", "sender") === "receiver" ? "receiver" : "sender",
     windowSec: Math.max(900, Math.min(86400, (+lsGet("hcPskMin", 30) || 30) * 60)),
+    mode: lsGet("hcPskMode", ""),                     // "" = all modes (server-side query filter)
+    band: lsGet("hcPskBand", ""),                     // "" = all bands (client-side filter)
     // kiosk falls back to the server-configured operator email (data.ui.pskContact)
     contact: lsGet("hcPskContact", "").trim() || data.ui?.pskContact || "",
   };
@@ -1016,7 +1025,15 @@ const pskColorBy = () => { const v = lsGet("hcPskColor", "band"); return ["band"
 // provider owns its own cache; the kiosk uses this one.
 let kioskPsk = null;
 function kioskPskCache() {
-  if (!kioskPsk) { kioskPsk = makePskJsonpCache({ getStation: () => data.station, getPsk: webPsk }); kioskPsk.start(); }
+  if (!kioskPsk) {
+    // onUpdate: merge + repaint the moment an answer lands - without it the map
+    // sits empty until the next 120s pullLayers tick (looked like a dead feature).
+    kioskPsk = makePskJsonpCache({
+      getStation: () => data.station, getPsk: webPsk,
+      onUpdate: () => { layers.psk = kioskPsk.get(); renderContext(); drawMap(); renderTiles(); },
+    });
+    kioskPsk.start();
+  }
   return kioskPsk;
 }
 function refreshPskNow() { if (STANDALONE) webProv?.refreshPsk?.(); else kioskPsk?.refresh?.(); }
@@ -1028,7 +1045,11 @@ let webProv = null, webProvP = null;
 function webProvider() {
   if (!webProvP) {
     webProvP = import("./hc-data-web.js").then((mod) => {
-      webProv = mod.makeWebProvider({ getStation: webStation, getPsk: webPsk });
+      webProv = mod.makeWebProvider({
+        getStation: webStation, getPsk: webPsk,
+        // Same immediate-merge as the kiosk: repaint as soon as a PSK answer lands.
+        onPskUpdate: () => { if (webProv) { layers = webProv.layers(); renderContext(); drawMap(); renderTiles(); } },
+      });
       webProv.start();
       return webProv;
     });
@@ -1122,6 +1143,8 @@ async function init() {
     if (d.sun != null) { setSunView(d.sun); renderSettings(); return; }
     if (d.pskdir != null) { lsSet("hcPskDir", d.pskdir); refreshPskNow(); renderSettings(); return; }
     if (d.pskmin != null) { lsSet("hcPskMin", d.pskmin); refreshPskNow(); renderSettings(); return; }
+    if (d.pskmode != null) { lsSet("hcPskMode", d.pskmode); refreshPskNow(); renderSettings(); return; }
+    if (d.pskband != null) { lsSet("hcPskBand", d.pskband); refreshPskNow(); renderSettings(); return; }
     if (d.pskcolor != null) { lsSet("hcPskColor", d.pskcolor); renderSettings(); syncUi(); return; }
     if (d.time != null) { timeFmt = d.time === "12" ? "12" : "24"; lsSet("hcTimeFmt", timeFmt); tickClocks(); renderSettings(); return; }
     if (d.auto != null) { autoSec = Math.max(3, Math.min(120, +d.auto || 15)); lsSet("hcAutoSec", String(autoSec)); scheduleAuto(); renderSettings(); return; }

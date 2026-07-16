@@ -69,7 +69,9 @@ const SAT_WATCHLIST = [
 ];
 
 // getStation() -> {call, grid, lat, lon}; getPsk() -> {direction, windowSec, contact}
-export function makeWebProvider({ getStation, getPsk }) {
+// onPskUpdate (optional): fired after every PSK query outcome so the page can
+// merge + redraw immediately instead of waiting for its next layers tick.
+export function makeWebProvider({ getStation, getPsk, onPskUpdate = null }) {
   const st = getStation();
   const spacewx = makeSpacewxCache({
     kpUrl: "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json",
@@ -90,7 +92,7 @@ export function makeWebProvider({ getStation, getPsk }) {
   const aurora = makeAuroraCache({ url: "https://services.swpc.noaa.gov/json/ovation_aurora_latest.json", refreshMs: 10 * 60000 });
   const sats = makeSatsCache({ url: "https://celestrak.org/NORAD/elements/gp.php?GROUP=amateur&FORMAT=tle", refreshMs: 4 * 3600000, watchlist: SAT_WATCHLIST });
 
-  const psk = makePskJsonpCache({ getStation, getPsk });
+  const psk = makePskJsonpCache({ getStation, getPsk, onUpdate: onPskUpdate });
   // DX spots (SpotHole) + SSN (DSD): simple hand-rolled caches.
   let spots = [], ssn = [];
   async function refreshSpots() {

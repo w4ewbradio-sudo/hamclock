@@ -9,13 +9,14 @@
 // direction "sender": reports OF my transmissions (who hears me) - remote = receiver.
 // direction "receiver": what I hear - remote = sender. rxCall/rxGrid carry the
 // REMOTE end because that's what the map plots and the panel lists.
-export function mapPskJson(json, { direction = "sender", limit = 50 } = {}) {
+export function mapPskJson(json, { direction = "sender", limit = 50, band = "" } = {}) {
   const rr = json && Array.isArray(json.receptionReport) ? json.receptionReport : [];
   const out = [];
   for (const r of rr) {
     const remoteCall = direction === "sender" ? r.receiverCallsign : r.senderCallsign;
     const remoteGrid = direction === "sender" ? r.receiverLocator : r.senderLocator;
     if (!remoteGrid) continue;
+    if (band && bandOfHz(r.frequency) !== band) continue;   // band filters client-side (no query param for it)
     const snr = Number(r.sNR);
     out.push({
       rxCall: remoteCall || "",
@@ -61,15 +62,23 @@ export function modeColor(mode) {
 }
 
 // ---- JSONP transport (browser only) ----
+// Callback names carry a per-page-load random token: two loads must never issue
+// byte-identical query URLs (pskreporter answers a too-soon identical repeat with
+// a throttle page instead of JSONP, which Chrome ORB-blocks).
 let jsonpN = 0;
+const jsonpTok = Math.random().toString(36).slice(2, 6);
 export function jsonp(url, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
-    const cb = "hcJsonpCb" + (++jsonpN);
+    const cb = "hcJsonpCb" + jsonpTok + (++jsonpN);
     const s = document.createElement("script");
-    const done = (fn, v) => { clearTimeout(timer); delete window[cb]; s.remove(); fn(v); };
+    let settled = false;
+    const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(timer); delete window[cb]; s.remove(); fn(v); };
     const timer = setTimeout(() => done(reject, new Error("jsonp timeout")), timeoutMs);
     window[cb] = (data) => done(resolve, data);
-    s.onerror = () => done(reject, new Error("jsonp load error"));
+    s.onerror = () => done(reject, new Error("jsonp blocked (load error)"));
+    // An ORB-blocked response "loads" as an empty script and never invokes the
+    // callback - reject right away instead of burning the full timeout.
+    s.onload = () => done(reject, new Error("jsonp blocked (empty answer)"));
     s.src = url + (url.includes("?") ? "&" : "?") + "callback=" + cb;
     document.head.appendChild(s);
   });
@@ -78,19 +87,28 @@ export function jsonp(url, timeoutMs = 20000) {
 const MIN_MS = 5 * 60 * 1000;
 
 // getStation() -> {call,...}; getPsk() -> {direction, windowSec, contact}
+// Injectables (jsonpImpl/storage/nowFn/rand) exist for node:test; browser callers
+// pass none of them. onUpdate fires after EVERY query outcome so the page can
+// merge + redraw immediately instead of waiting for its next layers tick.
 const LS_KEY = "hcPskCache1";
-const lsLoad = () => { try { return JSON.parse(localStorage.getItem(LS_KEY)) || null; } catch { return null; } };
-const lsSave = (v) => { try { localStorage.setItem(LS_KEY, JSON.stringify(v)); } catch { /* session-only */ } };
 
-export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
+export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImpl = jsonp, storage = null, nowFn = Date.now, rand = Math.random, onUpdate = null, forceFloorMs = 15000 }) {
+  const store = () => storage || localStorage;    // resolved lazily; guarded by try/catch below
+  const load = () => { try { return JSON.parse(store().getItem(LS_KEY)) || null; } catch { return null; } };
+  const save = () => { try { store().setItem(LS_KEY, JSON.stringify({ at: lastRun, updated: data.updated, reports: data.reports })); } catch { /* session-only */ } };
+  const ping = () => { try { onUpdate && onUpdate(); } catch { /* ui hook must not kill the poll loop */ } };
+  // Two page loads must never issue an identical query URL: pskreporter answers a
+  // too-soon identical repeat with a throttle page (non-JSONP -> ORB-blocked in
+  // Chrome). Shaving a random sliver off the window makes every load distinct.
+  const jitterSec = Math.floor(rand() * 120);
   let data = { updated: null, reports: [] };
   let status = { at: null, note: "starting" };   // last-query outcome, shown in the panel
-  let timer = null, lastRun = 0, emptyStreak = 0, lastKey = null;
+  let timer = null, pendingT = null, lastRun = 0, emptyStreak = 0, lastKey = null;
   // Persist last-good reports across page reloads: the display fills instantly,
   // and a reload inside the 5-minute gap does NOT re-query (burst protection -
   // pskreporter soft-throttles chatty IPs by returning EMPTY results).
-  const saved = lsLoad();
-  if (saved && Date.now() - (saved.at || 0) < 24 * 3600 * 1000 && Array.isArray(saved.reports)) {
+  const saved = load();
+  if (saved && nowFn() - (saved.at || 0) < 24 * 3600 * 1000 && Array.isArray(saved.reports)) {
     data = { updated: saved.updated || null, reports: saved.reports };
     lastRun = saved.at || 0;
   }
@@ -105,38 +123,55 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS }) {
       const windowSec = Math.min(86000, Math.floor(p.windowSec || 1800));
       // Big windows (6h/24h) are heavier queries: back off to 15-minute re-polls.
       const gap = windowSec >= 21600 ? 15 * 60000 : Math.max(minMs, MIN_MS);
-      if (Date.now() - lastRun < (force ? 15000 : gap - 5000)) return;  // settings-driven refreshes floor at 15s
-      lastRun = Date.now();
+      if (nowFn() - lastRun < (force ? forceFloorMs : gap - 5000)) {
+        // A settings change inside the etiquette floor must not vanish (the next
+        // poll is minutes away): defer it to just past the floor, one at a time.
+        if (force && !pendingT) {
+          const wait = Math.max(50, forceFloorMs - (nowFn() - lastRun));
+          pendingT = setTimeout(() => { pendingT = null; refresh(true); }, wait);
+        }
+        return;
+      }
+      if (pendingT) { clearTimeout(pendingT); pendingT = null; }   // this run supersedes any deferred one
+      lastRun = nowFn();
       const who = p.direction === "receiver" ? "receiverCallsign" : "senderCallsign";
       const url = "https://retrieve.pskreporter.info/query?" + who + "=" + encodeURIComponent(me)
-        + "&flowStartSeconds=-" + windowSec + "&rronly=1"
+        + "&flowStartSeconds=-" + (windowSec - jitterSec) + "&rronly=1"
+        + (p.mode ? "&mode=" + encodeURIComponent(p.mode) : "")   // server-side mode filter
         + (p.contact ? "&appcontact=" + encodeURIComponent(p.contact) : "");
-      const json = await jsonp(url);
+      const json = await jsonpImpl(url);
       const limit = windowSec >= 21600 ? 200 : 50;      // long windows plot more of the story
-      const reports = mapPskJson(json, { direction: p.direction || "sender", limit });
+      const reports = mapPskJson(json, { direction: p.direction || "sender", limit, band: p.band || "" });
       // Soft-throttle defense: pskreporter answers a penalized IP with a VALID but
       // EMPTY report list. Don't let one such answer wipe real data - only accept
       // an empty result once two consecutive polls agree. EXCEPT when the query
       // itself changed (direction/window/call): then the new answer is authoritative.
-      const key = me + "|" + p.direction + "|" + windowSec;
+      const key = me + "|" + p.direction + "|" + windowSec + "|" + (p.mode || "") + "|" + (p.band || "");
       const queryChanged = key !== lastKey; lastKey = key;
       if (!queryChanged && !reports.length && data.reports.length && emptyStreak < 1) {
         emptyStreak++;
         status = { at: new Date().toISOString(), note: "empty answer held (throttle?)" };
+        save(); ping();
         return;
       }
       emptyStreak = reports.length ? 0 : emptyStreak + 1;
       data = { updated: new Date().toISOString(), reports };
       status = { at: data.updated, note: reports.length + " report" + (reports.length === 1 ? "" : "s") };
-      lsSave({ at: lastRun, updated: data.updated, reports });
-    } catch {
-      status = { at: new Date().toISOString(), note: "no answer (timeout / throttled)" };
+      save(); ping();
+    } catch (e) {
+      status = {
+        at: new Date().toISOString(),
+        note: /blocked/i.test(e && e.message || "") ? "throttled by pskreporter" : "no answer (timeout)",
+      };
+      // Persist the attempt time too: a page reload right after a failure must not
+      // re-fire the query straight back into the throttle.
+      save(); ping();
     }
   }
   return {
     get: () => ({ ...data, status }),
     refresh: () => refresh(true),
     start() { refresh(false); timer = setInterval(() => refresh(false), Math.max(minMs, MIN_MS)); },
-    stop() { if (timer) clearInterval(timer); },
+    stop() { if (timer) clearInterval(timer); if (pendingT) { clearTimeout(pendingT); pendingT = null; } },
   };
 }
