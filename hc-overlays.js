@@ -46,12 +46,25 @@ const SAT_DOWNLINK_HZ = {
   43678: 145.900e6, // PO-101 FM
 };
 
-// Stroke a [[lon,lat],...] polyline, split at the antimeridian so nothing streaks.
-function strokeSegments(ctx, points, project, W, H) {
-  for (const seg of splitAntimeridian(points)) {
+// Stroke a [[lon,lat],...] polyline. Flat (equirect) projectors need the split
+// at the antimeridian so nothing streaks across the map; a globe projector is
+// continuous in longitude (splitting there leaves a visible GAP at the seam)
+// and instead reports per-point visibility via `front` - lift the pen across
+// the hidden stretch so lines neither chord through the disc nor break at 180.
+export function strokeSegments(ctx, points, project, W, H) {
+  if (!points || points.length < 2) return;
+  const seamless = "front" in project(points[0][0], points[0][1], W, H);
+  const segs = seamless ? [points] : splitAntimeridian(points);
+  for (const seg of segs) {
     if (seg.length < 2) continue;
     ctx.beginPath();
-    seg.forEach(([lon, lat], i) => { const p = project(lon, lat, W, H); i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y); });
+    let pen = false;
+    for (const [lon, lat] of seg) {
+      const p = project(lon, lat, W, H);
+      if (p.front === false) { pen = false; continue; }   // behind the globe
+      if (pen) ctx.lineTo(p.x, p.y); else ctx.moveTo(p.x, p.y);
+      pen = true;
+    }
     ctx.stroke();
   }
 }
@@ -354,9 +367,11 @@ function drawPsk(ctx, rc) {
     ctx.strokeStyle = hexA(col, 0.55);
     strokeSegments(ctx, greatCircle(deLat, deLon, ll.lat, ll.lon, 48), project, W, H);
     const p = project(ll.lon, ll.lat, W, H);
-    ctx.beginPath(); ctx.arc(p.x, p.y, 3.2, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill();
+    if (p.front === false) { ctx.shadowBlur = 0; continue; }   // receiver behind the globe
+    ctx.shadowBlur = 4;                               // dots stay crisp - the glow lives on the lines
+    ctx.beginPath(); ctx.arc(p.x, p.y, 2.1, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill();
     ctx.shadowBlur = 0;
-    ctx.beginPath(); ctx.arc(p.x, p.y, 1.3, 0, 2 * Math.PI); ctx.fillStyle = "#fff"; ctx.fill();  // hot core
+    ctx.beginPath(); ctx.arc(p.x, p.y, 0.8, 0, 2 * Math.PI); ctx.fillStyle = "#fff"; ctx.fill();  // hot core
   }
   ctx.restore();
 }

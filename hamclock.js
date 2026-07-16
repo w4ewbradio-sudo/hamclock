@@ -458,7 +458,7 @@ const OVERLAY_INFO = {
   beacons: "Plots all 18 NCDXF beacons on the map and highlights the ones transmitting now.",
   boundaries: "Political boundaries: country border lines (Natural Earth). Combines with any basemap — e.g. borders over the live satellite view.",
   citylights: "City Lights: NASA Black Marble night-lights glow on the dark side, over any basemap. Lock it on to keep it while Auto cycles.",
-  __auto: "Auto-rotate: cycles hands-free through the overlays you've turned on. Lock (🔒) an overlay to keep it visible the whole time.",
+  __auto: "Auto-rotate: cycles hands-free through the enabled overlays. Overlays you tap ON while AUTO runs are pinned (underlined) and stay visible the whole time; tap again to turn one off.",
 };
 const CTRL_INFO = {
   line: "Line map: dark vector coastlines - fastest and least busy.",
@@ -1068,7 +1068,7 @@ function drawOverlaysZ(ctx, rc, skip) {
 function renderChips() {
   const bar = $("hcChips"); if (!bar) return;
   bar.innerHTML = listOverlays().map((o) =>
-    `<button class="hcChip${enabled.has(o.id) ? " on" : ""}${auto && active === o.id && enabled.has(o.id) ? " live" : ""}" data-id="${esc(o.id)}" data-info="${esc(OVERLAY_INFO[o.id] || "")}">${esc(o.label)}</button>`
+    `<button class="hcChip${enabled.has(o.id) ? " on" : ""}${auto && active === o.id && enabled.has(o.id) ? " live" : ""}${auto && locked.has(o.id) && enabled.has(o.id) ? " pin" : ""}" data-id="${esc(o.id)}" data-info="${esc(OVERLAY_INFO[o.id] || "")}">${esc(o.label)}</button>`
   ).join("") + `<button class="hcChip hcAutoChip${auto ? " on" : ""}" data-id="__auto" data-info="${esc(OVERLAY_INFO.__auto)}">AUTO</button>`;
   const ids = enabledInOrder();
   $("hcDots").innerHTML = auto && ids.length > 1
@@ -1110,8 +1110,12 @@ function onChipClick(e) {
   const id = e.target?.dataset?.id;
   if (!id) return;
   if (id === "__auto") auto = !auto;
-  else if (enabled.has(id)) { enabled.delete(id); if (active === id) active = enabledInOrder()[0] || null; }
-  else { enabled.add(id); active = id; }   // most recently toggled-on drives the context panel
+  // While AUTO tours one overlay at a time, a chip the operator taps ON must
+  // STAY on the map (pinned/locked), not vanish until its next cycle slot -
+  // "I turned paths on and my psk lines never came back" was this.
+  else if (!enabled.has(id)) { enabled.add(id); if (auto) locked.add(id); active = id; }
+  else if (auto && !locked.has(id)) { locked.add(id); active = id; }   // cycling only -> pin it
+  else { enabled.delete(id); locked.delete(id); if (active === id) active = enabledInOrder()[0] || null; }
   persist(); syncUi();
 }
 function autoTick() {
