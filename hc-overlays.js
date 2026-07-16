@@ -386,7 +386,12 @@ function pskPanel(rc) {
   const filt = [rc.pskMode, rc.pskBand].filter(Boolean).map(esc).join(" &middot; ");
   const who = (rc.pskDirection === "receiver" ? `heard by ${esc(rc.station.call)}` : `hearing ${esc(rc.station.call)}`)
     + (filt ? ` (${filt})` : "");
-  if (!reps.length) return `<p class="hcMuted">no stations ${who} in the window</p>` + attr;
+  // A mode/band pick with no recent activity blanks the map by design (the new
+  // filter's answer is authoritative) - say so, or it reads as a crash.
+  if (!reps.length) {
+    const hint = filt ? `<p class="hcMuted">nothing matches the ${filt} filter yet - try a longer window or All</p>` : "";
+    return `<p class="hcMuted">no stations ${who} in the window</p>` + hint + attr;
+  }
   const colorBy = rc.pskColorBy || "band";
   // legend: counts per band or mode, swatches matching the map
   let legend = "";

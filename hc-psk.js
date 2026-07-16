@@ -11,14 +11,16 @@
 // REMOTE end because that's what the map plots and the panel lists.
 export function mapPskJson(json, { direction = "sender", limit = 50, band = "" } = {}) {
   const rr = json && Array.isArray(json.receptionReport) ? json.receptionReport : [];
-  const out = [];
+  // Newest report per receiver+mode+band: a beaconing station gets re-reported by
+  // the same receivers all day, and the map draws one line per remote end anyway.
+  const byKey = new Map();
   for (const r of rr) {
     const remoteCall = direction === "sender" ? r.receiverCallsign : r.senderCallsign;
     const remoteGrid = direction === "sender" ? r.receiverLocator : r.senderLocator;
     if (!remoteGrid) continue;
     if (band && bandOfHz(r.frequency) !== band) continue;   // band filters client-side (no query param for it)
     const snr = Number(r.sNR);
-    out.push({
+    const rep = {
       rxCall: remoteCall || "",
       rxGrid: remoteGrid,
       txCall: (direction === "sender" ? r.senderCallsign : r.receiverCallsign) || "",
@@ -26,10 +28,30 @@ export function mapPskJson(json, { direction = "sender", limit = 50, band = "" }
       mode: r.mode || "",
       snr: Number.isFinite(snr) ? snr : null,
       epoch: Number(r.flowStartSeconds) || 0,
-    });
+    };
+    const key = rep.rxCall + "|" + rep.mode + "|" + bandOfHz(rep.freqHz);
+    const prev = byKey.get(key);
+    if (!prev || rep.epoch > prev.epoch) byKey.set(key, rep);
+  }
+  // Fair-share the limit across modes: an always-on beacon (VARAC every few
+  // minutes) otherwise fills the whole newest-first slice and every other mode
+  // vanishes - a 24h "All" query would show zero of last night's FT8.
+  const groups = new Map();
+  for (const rep of byKey.values()) {
+    if (!groups.has(rep.mode)) groups.set(rep.mode, []);
+    groups.get(rep.mode).push(rep);
+  }
+  for (const g of groups.values()) g.sort((a, b) => b.epoch - a.epoch);
+  const out = [];
+  for (let i = 0; out.length < limit; i++) {
+    let took = false;
+    for (const g of groups.values()) {
+      if (i < g.length && out.length < limit) { out.push(g[i]); took = true; }
+    }
+    if (!took) break;
   }
   out.sort((a, b) => b.epoch - a.epoch);
-  return out.slice(0, limit);
+  return out;
 }
 
 // freqHz -> band name (mirrors the server's dx.js table; kept here so the
@@ -113,6 +135,7 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
     lastRun = saved.at || 0;
   }
   async function refresh(force) {
+    let windowSec = 0;      // hoisted: the catch's throttle note hints when a big window was the likely trigger
     try {
       const p = getPsk();
       const me = String(getStation()?.call || "").trim().toUpperCase();
@@ -120,7 +143,7 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
       // Cap just under 24h: pskreporter rejects windows "more than 24 hours" in the
       // past, and an exact -86400 can land over the line by the time it's processed
       // (the rejection has no JSONP wrapper, so it looks like a silent timeout).
-      const windowSec = Math.min(86000, Math.floor(p.windowSec || 1800));
+      windowSec = Math.min(86000, Math.floor(p.windowSec || 1800));
       // Big windows (6h/24h) are heavier queries: back off to 15-minute re-polls.
       const gap = windowSec >= 21600 ? 15 * 60000 : Math.max(minMs, MIN_MS);
       if (nowFn() - lastRun < (force ? forceFloorMs : gap - 5000)) {
@@ -161,7 +184,9 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
     } catch (e) {
       status = {
         at: new Date().toISOString(),
-        note: /blocked/i.test(e && e.message || "") ? "throttled by pskreporter" : "no answer (timeout)",
+        note: /blocked/i.test(e && e.message || "")
+          ? "throttled by pskreporter" + (windowSec >= 21600 ? " (6h/24h queries are often shed - try 1h)" : "")
+          : "no answer (timeout)",
       };
       // Persist the attempt time too: a page reload right after a failure must not
       // re-fire the query straight back into the throttle.
