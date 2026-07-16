@@ -3,7 +3,7 @@ import { listOverlays, drawOverlay, overlayPanel, ATTRIBUTIONS } from "./hc-over
 import { drawTile, listTiles, TILE_W, TILE_H } from "./hc-tiles.js";
 import { azimuthal, azimuthalInverse, gridToLatLon } from "./geo.js";
 import { makeGlobe3D, makeProjector } from "./hc-globe3d.js";
-import { makePskJsonpCache } from "./hc-psk.js";
+import { bandOfHz } from "./hc-psk.js";
 import { completeSatDate } from "./hc-gibs.js";
 import { parseDomainRanges, lastTimes, unionTimes, nearestAtOrBefore, flipbookDates, goesUrl, viirsUrl, footprintPoints, fadeAlpha, freshEnough, whiteFrac } from "./hc-anim.js";
 
@@ -1201,23 +1201,28 @@ function webPsk() {
   };
 }
 const pskColorBy = () => { const v = lsGet("hcPskColor", "band"); return ["band", "mode", "mono"].includes(v) ? v : "band"; };
-// PSK reports are fetched client-side on BOTH builds (JSONP works from any origin),
-// so the settings (direction / window / colors) work on the kiosk too. The web
-// provider owns its own cache; the kiosk uses this one.
-let kioskPsk = null;
-function kioskPskCache() {
-  if (!kioskPsk) {
-    // onUpdate: merge + repaint the moment an answer lands - without it the map
-    // sits empty until the next 120s pullLayers tick (looked like a dead feature).
-    kioskPsk = makePskJsonpCache({
-      getStation: () => data.station, getPsk: webPsk,
-      onUpdate: () => { layers.psk = kioskPsk.get(); renderContext(); drawMap(); renderTiles(); },
-    });
-    kioskPsk.start();
-  }
-  return kioskPsk;
+// PSK on the kiosk comes from the SERVER layer (/api/hamclock/layers): a server-side
+// fetch survives pskreporter's constant 503s / ORB blocks that the in-browser JSONP
+// path could not. The server sends the raw both-direction set; we filter it here by
+// the operator's direction/mode/band/window so changes apply instantly with no
+// re-query. HamClock Web (no backend) still fetches client-side via its web provider.
+let kioskPskRaw = { updated: null, reports: [] };
+function applyKioskPsk() {
+  const cfg = webPsk();
+  const nowS = Date.now() / 1000;
+  const reps = (kioskPskRaw.reports || []).filter((r) => {
+    if (cfg.direction !== "both" && r.dir && r.dir !== cfg.direction) return false;
+    if (cfg.mode && !String(r.mode || "").toUpperCase().startsWith(cfg.mode.toUpperCase())) return false;
+    if (cfg.band && bandOfHz(r.freqHz) !== cfg.band) return false;
+    if (cfg.windowSec && r.epoch && nowS - r.epoch > cfg.windowSec) return false;
+    return true;
+  });
+  layers.psk = { updated: kioskPskRaw.updated, reports: reps };
 }
-function refreshPskNow() { if (STANDALONE) webProv?.refreshPsk?.(); else kioskPsk?.refresh?.(); }
+function refreshPskNow() {
+  if (STANDALONE) { webProv?.refreshPsk?.(); return; }
+  applyKioskPsk(); renderContext(); drawMap(); renderTiles();
+}
 // Memoize the PROMISE, not the instance: pull()/pullLayers()/pullMode() all call
 // this concurrently at boot, and instance-memoization raced - three providers got
 // built, tripling every upstream query (incl. 3x heavy PSK fetches per page load,
@@ -1259,7 +1264,8 @@ async function pullLayers() {
     else {
       const r = await fetch("/api/hamclock/layers");
       if (r.ok) layers = await r.json();
-      layers.psk = kioskPskCache().get();   // psk is client-side everywhere (settings-aware)
+      kioskPskRaw = layers.psk || { updated: null, reports: [] };   // server-fetched both-direction set
+      applyKioskPsk();                                              // filter by operator settings -> layers.psk
     }
   } catch { /* keep last layers */ }
   renderContext(); drawMap(); renderTiles();
