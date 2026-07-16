@@ -5,6 +5,7 @@ import { azimuthal, azimuthalInverse, gridToLatLon } from "./geo.js";
 import { makeGlobe3D, makeProjector } from "./hc-globe3d.js";
 import { makePskJsonpCache } from "./hc-psk.js";
 import { completeSatDate } from "./hc-gibs.js";
+import { parseDomainRanges, lastTimes, unionTimes, nearestAtOrBefore, flipbookDates, goesUrl, viirsUrl } from "./hc-anim.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 // Standalone (HamClock Web): a static build served from GitHub Pages with no local
@@ -139,6 +140,89 @@ async function refreshSatDate() {
     const latest = dates && dates[dates.length - 1];
     if (latest) { const complete = completeSatDate(latest); if (complete !== satDate) { satDate = complete; loadSat(); } }
   } catch { if (!satDate) loadSat(); }                  // offline: fall back to the clock-based guess
+}
+
+// ---- satellite animation: CLOUDS (GOES 10-min loop) / DAYS (daily flipbook) ----
+const GOES_LAYERS = ["GOES-East_ABI_GeoColor", "GOES-West_ABI_GeoColor"];
+const GOES_DOMAINS = (l) => `https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/1.0.0/${l}/default/2km/-180,-90,180,90/all.xml`;
+const ANIM_FRAMES = 12, ANIM_W = 1024, ANIM_H = 512, FLIP_DAYS = 10;
+const forcedAnim = new URLSearchParams(location.search).get("anim"); // debug/screenshots
+let animChoice = (() => { const v = localStorage.getItem("hcAnim"); return ["clouds", "days"].includes(v) ? v : ""; })();
+function animMode() {
+  const m = forcedAnim != null ? (["clouds", "days"].includes(forcedAnim) ? forcedAnim : "") : animChoice;
+  return effectiveStyle() === "satellite" ? m : "";
+}
+let animFrames = [];        // [{t, src}] src: canvas (clouds) or Image (days)
+let animIdx = 0, animKey = "", animTimer = null, animRefTimer = null;
+function animFrameImg() { return animFrames.length ? animFrames[Math.min(animIdx, animFrames.length - 1)].src : null; }
+const loadImg = (url) => new Promise((res, rej) => {
+  const im = new Image(); im.crossOrigin = "anonymous";
+  im.onload = () => res(im); im.onerror = () => rej(new Error("img " + url));
+  im.src = url;
+});
+async function buildCloudFrames() {
+  // Per-layer valid times from DescribeDomains (gap-aware); frames = union of the
+  // newest stamps; each sat draws its nearest frame <= t so a lagging sat holds
+  // its newest picture while the fresher one keeps moving.
+  const domains = await Promise.all(GOES_LAYERS.map(async (l) => {
+    try { return lastTimes(parseDomainRanges(await (await fetch(GOES_DOMAINS(l), { cache: "no-store" })).text()), 72); }
+    catch { return []; }
+  }));
+  const times = unionTimes(domains[0], domains[1], ANIM_FRAMES);
+  if (!times.length || !satReady) return { key: animKey, frames: [] };
+  const key = "clouds|" + times.join(",");
+  if (key === animKey) return { key, frames: animFrames };   // nothing new - keep current canvases
+  const frames = [];
+  for (const t of times) {                              // sequential: be gentle to GIBS
+    const cv = document.createElement("canvas"); cv.width = ANIM_W; cv.height = ANIM_H;
+    const cx = cv.getContext("2d");
+    cx.drawImage(worldSat, 0, 0, ANIM_W, ANIM_H);       // static global base under the discs
+    for (let i = 0; i < GOES_LAYERS.length; i++) {
+      const ft = nearestAtOrBefore(domains[i], t);
+      if (!ft) continue;
+      try { cx.drawImage(await loadImg(goesUrl(GOES_LAYERS[i], ft, ANIM_W, ANIM_H)), 0, 0, ANIM_W, ANIM_H); } catch { /* hole stays base */ }
+    }
+    frames.push({ t, src: cv });
+  }
+  return { key, frames };
+}
+async function buildDayFrames() {
+  const latest = satDate || completeSatDate(new Date().toISOString().slice(0, 10));
+  const dates = flipbookDates(latest, FLIP_DAYS);
+  const key = "days|" + dates.join(",");
+  if (key === animKey) return { key, frames: animFrames };
+  const frames = [];
+  for (const d of dates) {
+    try { frames.push({ t: d, src: await loadImg(viirsUrl(SAT_LAYER, d, 2048, 1024)) }); } catch { /* skip missing day */ }
+  }
+  return { key, frames };
+}
+async function refreshAnimFrames() {
+  const m = animMode(); if (!m) return;
+  const fresh = await (m === "clouds" ? buildCloudFrames() : buildDayFrames());
+  if (fresh.frames.length && animMode() === m) {
+    animFrames = fresh.frames; animKey = fresh.key;
+    if (animIdx >= animFrames.length) animIdx = 0;
+  }
+}
+function animTick() {
+  if (!animMode() || animFrames.length < 2) return;
+  animIdx = (animIdx + 1) % animFrames.length;
+  drawMap();
+}
+let animRunMode = "";       // mode the timers below were started for
+function syncAnim() {
+  // restart timers on ANY mode change (off<->on and clouds<->days); called from syncUi()
+  const m = animMode();
+  if (m === animRunMode) return;
+  clearInterval(animTimer); clearInterval(animRefTimer);
+  animTimer = animRefTimer = null; animFrames = []; animKey = ""; animIdx = 0;
+  animRunMode = m;
+  if (m) {
+    animTimer = setInterval(animTick, 300);
+    animRefTimer = setInterval(refreshAnimFrames, m === "clouds" ? 10 * 60000 : 3600 * 1000);
+    refreshAnimFrames();
+  }
 }
 
 const MAP_STYLES = ["line", "terrain", "day-night", "satellite"];
@@ -308,6 +392,7 @@ const CTRL_INFO = {
   satellite: "Satellite: NASA GIBS global true-color mosaic (VIIRS) — the latest complete day of real cloud cover, updated daily.",
   equirect: "Flat (equirectangular): the standard rectangular world map.",
   azimuthal: "Globe: a real WebGL 3D sphere, sun-lit with true day/night. Drag to rotate, SPIN to auto-rotate, HOME to re-center on your station.",
+  anim: "Animate the satellite view: CLOUDS loops the last two hours of 10-minute NOAA GOES imagery (western hemisphere); DAYS flips through the last 10 days of global mosaics.",
 };
 
 let lastTilesH = -1;
@@ -596,8 +681,9 @@ function drawNight(ctx, sub, W, H) {
 // image already degraded inside effectiveStyle().
 function drawBase(ctx, W, H, style, sub) {
   if (style === "satellite") {
-    ctx.drawImage(worldSat, 0, 0, W, H);   // live global true-color cloud mosaic
-    drawNight(ctx, sub, W, H);             // shade the current night side for context
+    const fr = animMode() ? animFrameImg() : null;
+    ctx.drawImage(fr || worldSat, 0, 0, W, H);   // live loop frame, else static mosaic
+    if (!animMode()) drawNight(ctx, sub, W, H);  // GOES GeoColor already carries real day/night
     return;
   }
   if (style === "terrain") {
@@ -804,7 +890,8 @@ function drawGlobe3D(ctx, W, H) {
   const R = Math.min(W / 2, H / 2) - 18, cx = W / 2, cy = H / 2;
   const sub = subsolarPoint(new Date());
   const style = effectiveStyle();
-  const dayImg = style === "satellite" ? worldSat : worldDay;
+  const animFr = style === "satellite" && animMode() ? animFrameImg() : null;
+  const dayImg = style === "satellite" ? (animFr || worldSat) : worldDay;
   const glcv = g3.render({
     W, H, dpr: window.devicePixelRatio || 1, cx, cy, R,
     centerLat: ctr.lat, centerLon: ctr.lon, sunLon: sub.lon, sunLat: sub.lat,
@@ -918,13 +1005,17 @@ function renderMapCtl() {
     `<button class="hcChip${cur === s ? " on" : ""}" data-style="${s}" data-info="${esc(CTRL_INFO[s] || "")}">${s === "day-night" ? "DAY-NITE" : s === "satellite" ? "SATELLITE" : s.toUpperCase()}</button>`
   ).join("") + PROJECTIONS.map((p) =>
     `<button class="hcChip hcAutoChip${effectiveProj() === p ? " on" : ""}" data-proj="${p}" data-info="${esc(CTRL_INFO[p] || "")}">${p === "equirect" ? "FLAT" : "GLOBE"}</button>`
-  ).join("");
+  ).join("") + (effectiveStyle() === "satellite"
+    ? `<button class="hcChip hcAutoChip${animMode() ? " on" : ""}" data-anim="1" data-info="${esc(CTRL_INFO.anim)}">${animMode() === "clouds" ? "CLOUDS" : animMode() === "days" ? "DAYS" : "ANIM"}</button>`
+    : "");
 }
 function renderLegend() {
   const lines = visibleIds().map((id) => ATTRIBUTIONS[id]).filter(Boolean);
   const est = effectiveStyle();
-  if (est === "satellite") lines.push("Basemap: NASA GIBS / VIIRS true-color (daily)");
-  else if (est !== "line") lines.push("Basemap: NASA Blue Marble / Black Marble");
+  if (est === "satellite") {
+    lines.push("Basemap: NASA GIBS / VIIRS true-color (daily)");
+    if (animMode() === "clouds") lines.push("Clouds: NOAA GOES-East/West via NASA GIBS");
+  } else if (est !== "line") lines.push("Basemap: NASA Blue Marble / Black Marble");
   const el = $("hcLegend");
   el.innerHTML = lines.map((l) => `<div>${esc(l)}</div>`).join("");
   el.style.display = lines.length ? "block" : "none";
@@ -935,7 +1026,7 @@ function renderContext() {
   const html = o && enabled.has(o.id) ? overlayPanel(o.id, rcFor(0, 0)) : null;
   $("hcCtx").innerHTML = html || `<p class="hcMuted">&mdash;</p>`;
 }
-function syncUi() { renderChips(); renderMapCtl(); renderLegend(); renderContext(); drawMap(); }
+function syncUi() { renderChips(); renderMapCtl(); renderLegend(); renderContext(); syncAnim(); drawMap(); }
 
 function onChipClick(e) {
   const id = e.target?.dataset?.id;
@@ -1103,6 +1194,11 @@ async function init() {
   fetch(ASSET("world-boundaries.json")).then((r) => r.json()).then((b) => { bounds = b; drawMap(); }).catch(() => {});
   $("hcChips").addEventListener("click", onChipClick);
   $("hcMapCtl").addEventListener("click", (e) => {
+    if (e.target?.dataset?.anim) {
+      animChoice = animChoice === "" ? "clouds" : animChoice === "clouds" ? "days" : "";
+      try { localStorage.setItem("hcAnim", animChoice); } catch { /* session-only */ }
+      syncUi(); return;
+    }
     const s = e.target?.dataset?.style;
     if (s && MAP_STYLES.includes(s)) { styleChoice = s; persistStyle(s); syncUi(); return; }
     const p = e.target?.dataset?.proj;

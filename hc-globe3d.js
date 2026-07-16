@@ -122,18 +122,31 @@ export function makeGlobe3D() {
     return t;
   };
   const dayTex = mkTex(0), nightTex = mkTex(1);
-  let dayKey = null, nightKey = null;
-  function upload(unit, tex, img, keyGet, keySet) {
-    if (!img || !img.complete || !img.naturalWidth) return;
-    if (keyGet() === img.src) return;                 // already uploaded this image
+  let dayImgRef = null, nightImgRef = null;
+  // img may be an HTMLImageElement (DAYS mode / night city-lights) or an
+  // HTMLCanvasElement (CLOUDS mode, GOES composited over the base mosaic per
+  // frame). Canvases have no `.complete`/`.naturalWidth`/`.src`, so readiness
+  // and the "already uploaded" cache must work for both. Cache key: Images by
+  // `.src` (a long-lived Image like worldSat has its src MUTATED on the daily
+  // mosaic roll, so object identity alone would freeze it), canvases by object
+  // identity (no src; each anim frame is a distinct canvas).
+  function upload(unit, tex, img, refGet, refSet) {
+    if (!img) return;
+    const isCanvas = typeof HTMLCanvasElement !== "undefined" && img instanceof HTMLCanvasElement;
+    const w = isCanvas ? img.width : img.naturalWidth;
+    const h = isCanvas ? img.height : img.naturalHeight;
+    const ready = isCanvas ? !!(w && h) : !!(img.complete && w);
+    if (!ready) return;
+    const k = img.src || img;                          // Image -> src string, canvas -> the object itself
+    if (refGet() === k) return;                        // already uploaded this frame
     gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex);
     try {
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
       // Wrap longitude (S) so the ±180 edges blend -> no meridian seam. WebGL1 only
       // allows REPEAT on power-of-two textures; fall back to CLAMP otherwise.
-      const pot = (img.naturalWidth & (img.naturalWidth - 1)) === 0 && (img.naturalHeight & (img.naturalHeight - 1)) === 0;
+      const pot = (w & (w - 1)) === 0 && (h & (h - 1)) === 0;
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, pot ? gl.REPEAT : gl.CLAMP_TO_EDGE);
-      keySet(img.src);
+      refSet(k);
     } catch { /* CORS-tainted etc: skip */ }
   }
 
@@ -145,9 +158,9 @@ export function makeGlobe3D() {
     gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     gl.useProgram(prog);
     const line = o.style === "line";
-    if (!line) upload(0, dayTex, o.dayImg, () => dayKey, (v) => (dayKey = v));
+    if (!line) upload(0, dayTex, o.dayImg, () => dayImgRef, (v) => (dayImgRef = v));
     // night-lights texture is needed for day-night style AND the City Lights overlay
-    if (o.style === "day-night" || o.cityLights) upload(1, nightTex, o.nightImg, () => nightKey, (v) => (nightKey = v));
+    if (o.style === "day-night" || o.cityLights) upload(1, nightTex, o.nightImg, () => nightImgRef, (v) => (nightImgRef = v));
     gl.uniformMatrix3fv(uM, false, glMat3(globeMatrix(o.centerLat, o.centerLon)));
     gl.uniform2f(uCenter, o.cx, o.cy); gl.uniform1f(uR, o.R); gl.uniform2f(uVP, o.W, o.H);
     const sun = lonLatToXYZ(o.sunLon, o.sunLat); gl.uniform3f(uSun, sun[0], sun[1], sun[2]);
