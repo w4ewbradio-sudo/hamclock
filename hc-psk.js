@@ -108,6 +108,21 @@ export function jsonp(url, timeoutMs = 20000) {
 
 const MIN_MS = 5 * 60 * 1000;
 
+// Display-time filter over the retained set. The cache holds BOTH directions and
+// ALL modes; the page filters what it SHOWS, so clicking a mode/band/direction chip
+// is instant, fires NO pskreporter query, and can never blank the retained data.
+// Shared by the kiosk (over the server layer) and HamClock Web (over the JSONP cache).
+export function filterPskReports(reports, { direction = "both", mode = "", band = "", windowSec = 0 } = {}, nowMs = Date.now()) {
+  const nowS = nowMs / 1000;
+  return (reports || []).filter((r) => {
+    if (direction !== "both" && r.dir && r.dir !== direction) return false;
+    if (mode && !String(r.mode || "").toUpperCase().startsWith(mode.toUpperCase())) return false;
+    if (band && bandOfHz(r.freqHz) !== band) return false;
+    if (windowSec && r.epoch && nowS - r.epoch > windowSec) return false;
+    return true;
+  });
+}
+
 // How long a spot stays on the map after it was last reported. Retaining spots
 // across polls is what stops the display from blanking during the things that
 // kept wiping it: pskreporter 503s / empty-throttle answers, brief quiet gaps,
@@ -158,7 +173,10 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
     prune(lastRetMs, nowFn());
     updated = saved.updated || null;
     lastRun = saved.at || 0;
-    filterKey = saved.filterKey || null;
+    // filterKey is now just the callsign; older saves baked filters in
+    // ("W4EWB|FT8||both") - take the call part so a restore never looks like
+    // a callsign change (which would clear the spots we just loaded).
+    filterKey = String(saved.filterKey || "").split("|")[0] || null;
   }
 
   async function refresh(force) {
@@ -173,14 +191,14 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
       windowSec = Math.min(86000, Math.floor(p.windowSec || 1800));
       retMs = lastRetMs = retentionMs(windowSec);
 
-      // A change to WHAT we ask (call/mode/band/direction) makes the retained set
-      // stale, so clear it and let the new filter repopulate authoritatively. A
-      // window-only change keeps the spots (retention is independent of the window).
-      // Guard on filterKey !== null so the first poll after a restore never wipes
-      // the spots we just loaded (that was the "lines vanish on load" bug).
-      const fk = me + "|" + (p.mode || "") + "|" + (p.band || "") + "|" + (p.direction || "sender");
-      if (filterKey !== null && fk !== filterKey) retained.clear();
-      filterKey = fk;
+      // Queries are UNFILTERED (no mode/band/direction baked in): direction, mode
+      // and band are display-time filters (filterPskReports), so a settings change
+      // is instant and can never blank the retained data. Only a CALLSIGN change
+      // invalidates the set. (Baking filters into the query was the "picking a
+      // mode wiped the map / refresh came back empty" bug: the clear ran before
+      // the etiquette floor even allowed a replacement query.)
+      if (filterKey !== null && me !== filterKey) retained.clear();
+      filterKey = me;
 
       // Big windows (6h/24h) are heavier queries: back off to 15-minute re-polls.
       const gap = windowSec >= 21600 ? 15 * 60000 : Math.max(minMs, MIN_MS);
@@ -196,27 +214,24 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
       if (pendingT) { clearTimeout(pendingT); pendingT = null; }   // this run supersedes any deferred one
       lastRun = nowFn();
 
-      // "both" alternates the queried direction each poll (one query per poll keeps
+      // ALWAYS alternate the queried direction each poll (one query per poll keeps
       // pskreporter's etiquette); retention keeps the other side visible in between,
-      // so you see lines whether W4EWB is transmitting OR receiving.
-      const dir = p.direction === "receiver" ? "receiver" : p.direction === "both" ? pollDir : "sender";
-      if (p.direction === "both") pollDir = pollDir === "sender" ? "receiver" : "sender";
+      // so both "who hears me" and "what I hear" stay populated for the display filter.
+      const dir = pollDir;
+      pollDir = pollDir === "sender" ? "receiver" : "sender";
 
       const who = dir === "receiver" ? "receiverCallsign" : "senderCallsign";
       const url = "https://retrieve.pskreporter.info/query?" + who + "=" + encodeURIComponent(me)
         + "&flowStartSeconds=-" + (windowSec - jitterSec) + "&rronly=1"
-        + (p.mode ? "&mode=" + encodeURIComponent(p.mode) : "")   // server-side mode filter
         + (p.contact ? "&appcontact=" + encodeURIComponent(p.contact) : "");
       const json = await jsonpImpl(url);
-      const limit = windowSec >= 21600 ? 200 : 50;      // long windows plot more of the story
-      const fresh = mapPskJson(json, { direction: dir, limit, band: p.band || "" });
+      const limit = windowSec >= 21600 ? 300 : 100;     // long windows plot more of the story
+      const fresh = mapPskJson(json, { direction: dir, limit });
       const now = nowFn();
       for (const s of fresh) { s.dir = dir; retained.set(spotKey(s), s); }
       prune(retMs, now);
       updated = new Date().toISOString();
-      const shown = retained.size;
-      status = { at: updated, note: (fresh.length ? fresh.length + " new / " : "") + shown + " shown"
-        + (p.direction === "both" ? " (TX+RX)" : "") };
+      status = { at: updated, note: (fresh.length ? fresh.length + " new / " : "") + retained.size + " held (TX+RX)" };
       save(); ping();
     } catch (e) {
       // Never wipe on a throttle/timeout: keep the retained spots (aged) on the map.

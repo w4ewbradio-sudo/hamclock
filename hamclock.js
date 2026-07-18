@@ -3,7 +3,7 @@ import { listOverlays, drawOverlay, overlayPanel, ATTRIBUTIONS } from "./hc-over
 import { drawTile, listTiles, TILE_W, TILE_H } from "./hc-tiles.js";
 import { azimuthal, azimuthalInverse, gridToLatLon } from "./geo.js";
 import { makeGlobe3D, makeProjector } from "./hc-globe3d.js";
-import { bandOfHz } from "./hc-psk.js";
+import { filterPskReports } from "./hc-psk.js";
 import { completeSatDate } from "./hc-gibs.js";
 import { parseDomainRanges, lastTimes, unionTimes, nearestAtOrBefore, flipbookDates, goesUrl, viirsUrl, footprintPoints, fadeAlpha, freshEnough, whiteFrac } from "./hc-anim.js";
 
@@ -1208,19 +1208,16 @@ const pskColorBy = () => { const v = lsGet("hcPskColor", "band"); return ["band"
 // re-query. HamClock Web (no backend) still fetches client-side via its web provider.
 let kioskPskRaw = { updated: null, reports: [] };
 function applyKioskPsk() {
-  const cfg = webPsk();
-  const nowS = Date.now() / 1000;
-  const reps = (kioskPskRaw.reports || []).filter((r) => {
-    if (cfg.direction !== "both" && r.dir && r.dir !== cfg.direction) return false;
-    if (cfg.mode && !String(r.mode || "").toUpperCase().startsWith(cfg.mode.toUpperCase())) return false;
-    if (cfg.band && bandOfHz(r.freqHz) !== cfg.band) return false;
-    if (cfg.windowSec && r.epoch && nowS - r.epoch > cfg.windowSec) return false;
-    return true;
-  });
-  layers.psk = { updated: kioskPskRaw.updated, reports: reps };
+  layers.psk = { updated: kioskPskRaw.updated, reports: filterPskReports(kioskPskRaw.reports, webPsk()) };
 }
+// Settings clicks re-FILTER what's already in hand and repaint - they never query
+// pskreporter (that was the operator's concern: a click-storm hammering their API).
+// New data arrives only on the slow background polls.
 function refreshPskNow() {
-  if (STANDALONE) { webProv?.refreshPsk?.(); return; }
+  if (STANDALONE) {
+    if (webProv) { layers = webProv.layers(); renderContext(); drawMap(); renderTiles(); }
+    return;
+  }
   applyKioskPsk(); renderContext(); drawMap(); renderTiles();
 }
 // Memoize the PROMISE, not the instance: pull()/pullLayers()/pullMode() all call

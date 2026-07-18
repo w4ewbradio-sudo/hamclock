@@ -353,13 +353,22 @@ function pskReportColor(r, colorBy) {
   if (colorBy === "mono") return "#40e0d0";
   return bandColor(bandOfHz(r.freqHz));               // default: band (matches the Paths legend)
 }
+// Draw order: bigger color-groups first (bottom), smaller ones last (top), so a
+// flood of one mode (366 green FT8 lines) can never bury a handful of another
+// (28 magenta VARAC) - the minority always stays visible.
+export function orderPskForDraw(reports, colorBy) {
+  const key = (r) => (colorBy === "mode" ? modeColor(r.mode) : colorBy === "mono" ? "m" : bandOfHz(r.freqHz));
+  const counts = new Map();
+  for (const r of reports) { const k = key(r); counts.set(k, (counts.get(k) || 0) + 1); }
+  return [...reports].sort((a, b) => counts.get(key(b)) - counts.get(key(a)));   // stable: ties keep order
+}
 function drawPsk(ctx, rc) {
   const { W, H, project, layers, station } = rc;
   const deLat = Number(station.lat), deLon = Number(station.lon);
   const colorBy = rc.pskColorBy || "band";
   ctx.save();
   ctx.lineWidth = 1.1;
-  for (const r of layers.psk?.reports || []) {
+  for (const r of orderPskForDraw(layers.psk?.reports || [], colorBy)) {
     const ll = gridToLatLon(r.rxGrid);
     if (!ll) continue;
     const col = pskReportColor(r, colorBy);

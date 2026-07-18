@@ -19,7 +19,7 @@ import { makeAuroraCache } from "./feeds/aurora.js";
 import { makeWeatherCache } from "./feeds/weather.js";
 import { makeSatsCache } from "./feeds/sats.js";
 import { bandFor } from "./feeds/dx.js";
-import { makePskJsonpCache } from "./hc-psk.js";
+import { makePskJsonpCache, filterPskReports } from "./hc-psk.js";
 
 // ---- pure helpers (unit-tested) ----
 
@@ -157,7 +157,13 @@ export function makeWebProvider({ getStation, getPsk, onPskUpdate = null }) {
       };
     },
     layers() {
-      return { sats: sats.get(), muf: muf.get(), drap: drap.get(), psk: psk.get(), aurora: aurora.get(), fof2: fof2.get() };
+      // psk: the cache holds both directions / all modes; show only what the
+      // operator's settings select (instant, no re-query on a settings click).
+      const rawPsk = psk.get();
+      return {
+        sats: sats.get(), muf: muf.get(), drap: drap.get(), aurora: aurora.get(), fof2: fof2.get(),
+        psk: { ...rawPsk, reports: filterPskReports(rawPsk.reports, getPsk()) },
+      };
     },
     mode() { const r = psk.get().reports; return (r[0] && r[0].mode) || null; },
   };
