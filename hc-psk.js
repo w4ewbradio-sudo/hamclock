@@ -5,17 +5,24 @@
 // the operator provides one. Pure helpers (mapPskJson/bandOfHz/modeColor) are
 // DOM-free for node:test.
 
-// PSKReporter JSONP JSON -> flat report shape (same as the old XML parser).
-// direction "sender": reports OF my transmissions (who hears me) - remote = receiver.
-// direction "receiver": what I hear - remote = sender. rxCall/rxGrid carry the
-// REMOTE end because that's what the map plots and the panel lists.
-export function mapPskJson(json, { direction = "sender", limit = 50, band = "" } = {}) {
+// PSKReporter JSONP JSON -> flat report shape.
+// The `callsign=` query returns BOTH directions interleaved, so direction is a
+// property of each ROW, not of the query: if we are the sender the remote end is
+// the receiver (they heard us, dir "sender"); if we are the receiver the remote
+// end is the sender (we heard them, dir "receiver"). rxCall/rxGrid always carry
+// the REMOTE end because that's what the map plots and the panel lists.
+export function mapPskJson(json, { call = "", limit = 50, band = "" } = {}) {
   const rr = json && Array.isArray(json.receptionReport) ? json.receptionReport : [];
-  // Newest report per receiver+mode+band: a beaconing station gets re-reported by
-  // the same receivers all day, and the map draws one line per remote end anyway.
+  const me = String(call || "").trim().toUpperCase();
+  // Newest report per direction+receiver+mode+band: a beaconing station gets
+  // re-reported by the same receivers all day, and the map draws one line per
+  // remote end anyway.
   const byKey = new Map();
   for (const r of rr) {
+    const direction = String(r.senderCallsign || "").toUpperCase() === me ? "sender" : "receiver";
     const remoteCall = direction === "sender" ? r.receiverCallsign : r.senderCallsign;
+    // Self-reception (we are BOTH ends) would plot a line from us to us.
+    if (String(remoteCall || "").toUpperCase() === me) continue;
     const remoteGrid = direction === "sender" ? r.receiverLocator : r.senderLocator;
     if (!remoteGrid) continue;
     if (band && bandOfHz(r.frequency) !== band) continue;   // band filters client-side (no query param for it)
@@ -28,8 +35,9 @@ export function mapPskJson(json, { direction = "sender", limit = 50, band = "" }
       mode: r.mode || "",
       snr: Number.isFinite(snr) ? snr : null,
       epoch: Number(r.flowStartSeconds) || 0,
+      dir: direction,
     };
-    const key = rep.rxCall + "|" + rep.mode + "|" + bandOfHz(rep.freqHz);
+    const key = rep.dir + "|" + rep.rxCall + "|" + rep.mode + "|" + bandOfHz(rep.freqHz);
     const prev = byKey.get(key);
     if (!prev || rep.epoch > prev.epoch) byKey.set(key, rep);
   }
@@ -108,6 +116,12 @@ export function jsonp(url, timeoutMs = 20000) {
 
 const MIN_MS = 5 * 60 * 1000;
 
+// How far back a single upstream query asks. Deliberately short and independent of
+// the operator's display window - see the note at the query site: the endpoint
+// truncates by result volume, so a long window returns a partial, mode-skewed
+// answer while a short one returns a complete slice that retention accumulates.
+const QUERY_WINDOW_SEC = 3600;
+
 // Display-time filter over the retained set. The cache holds BOTH directions and
 // ALL modes; the page filters what it SHOWS, so clicking a mode/band/direction chip
 // is instant, fires NO pskreporter query, and can never blank the retained data.
@@ -159,7 +173,6 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
   let updated = null;
   let status = { at: null, note: "starting" };   // last-query outcome, shown in the panel
   let timer = null, pendingT = null, lastRun = 0, filterKey = null, lastRetMs = retentionMs(1800);
-  let pollDir = "sender";                          // alternates each poll when direction is "both"
 
   const save = () => { try { store().setItem(LS_KEY, JSON.stringify({ at: lastRun, updated, filterKey, retained: [...retained.values()] })); } catch { /* session-only */ } };
 
@@ -185,9 +198,8 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
       const p = getPsk();
       const me = String(getStation()?.call || "").trim().toUpperCase();
       if (!me || me === "N0CALL") { status = { at: new Date().toISOString(), note: "no callsign set" }; return; }
-      // Cap just under 24h: pskreporter rejects windows "more than 24 hours" in the
-      // past, and an exact -86400 can land over the line by the time it's processed
-      // (the rejection has no JSONP wrapper, so it looks like a silent timeout).
+      // windowSec is the operator's DISPLAY window; it drives retention and the
+      // display-time filter, and may be as long as 24h.
       windowSec = Math.min(86000, Math.floor(p.windowSec || 1800));
       retMs = lastRetMs = retentionMs(windowSec);
 
@@ -214,21 +226,29 @@ export function makePskJsonpCache({ getStation, getPsk, minMs = MIN_MS, jsonpImp
       if (pendingT) { clearTimeout(pendingT); pendingT = null; }   // this run supersedes any deferred one
       lastRun = nowFn();
 
-      // ALWAYS alternate the queried direction each poll (one query per poll keeps
-      // pskreporter's etiquette); retention keeps the other side visible in between,
-      // so both "who hears me" and "what I hear" stay populated for the display filter.
-      const dir = pollDir;
-      pollDir = pollDir === "sender" ? "receiver" : "sender";
-
-      const who = dir === "receiver" ? "receiverCallsign" : "senderCallsign";
-      const url = "https://retrieve.pskreporter.info/query?" + who + "=" + encodeURIComponent(me)
-        + "&flowStartSeconds=-" + (windowSec - jitterSec) + "&rronly=1"
+      // ONE query covers BOTH directions. This used to alternate senderCallsign /
+      // receiverCallsign per poll because retrieve.pskreporter.info/query answers
+      // only one side at a time - but that endpoint now 503s every caller, and the
+      // alternation also left each direction stale for a whole interval. `callsign=`
+      // against the backend pskreporter.info's own map uses returns our
+      // transmissions AND our receptions together, so one query per poll still
+      // honors the >= 5 min etiquette floor while keeping both sides fresh.
+      // The QUERY window is capped short and is NOT the display window. The endpoint
+      // truncates by result VOLUME: an unfiltered 24h request comes back holding only
+      // the most recent ~1h, because a busy FT8 receive period fills the cap and
+      // crowds every other mode out of the answer. Asking for one hour returns a
+      // COMPLETE hour with all modes present, and 5-minute polling into the retained
+      // set accumulates the operator's longer window over time.
+      const qWindow = Math.max(600, Math.min(QUERY_WINDOW_SEC, windowSec) - jitterSec);
+      const url = "https://pskreporter.info/cgi-bin/pskquery5.pl?rronly=1"
+        + "&flowStartSeconds=-" + qWindow
+        + "&callsign=" + encodeURIComponent(me)
         + (p.contact ? "&appcontact=" + encodeURIComponent(p.contact) : "");
       const json = await jsonpImpl(url);
       const limit = windowSec >= 21600 ? 300 : 100;     // long windows plot more of the story
-      const fresh = mapPskJson(json, { direction: dir, limit });
+      const fresh = mapPskJson(json, { call: me, limit });
       const now = nowFn();
-      for (const s of fresh) { s.dir = dir; retained.set(spotKey(s), s); }
+      for (const s of fresh) retained.set(spotKey(s), s);
       prune(retMs, now);
       updated = new Date().toISOString();
       status = { at: updated, note: (fresh.length ? fresh.length + " new / " : "") + retained.size + " held (TX+RX)" };
