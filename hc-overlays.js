@@ -362,22 +362,39 @@ export function orderPskForDraw(reports, colorBy) {
   for (const r of reports) { const k = key(r); counts.set(k, (counts.get(k) || 0) + 1); }
   return [...reports].sort((a, b) => counts.get(key(b)) - counts.get(key(a)));   // stable: ties keep order
 }
+// Per-report geometry (rx lat/lon + the DE->rx great-circle arc) is identical every
+// frame while the globe spins - only the PROJECTION of it changes. Recomputing the
+// 48-point slerp for every report every frame is what made a busy map (hundreds of
+// spots) choppy to spin. Memoize it per report object, invalidating only when the
+// DE actually moves. A new reports array each data pull brings fresh report objects,
+// so old entries fall out of the WeakMap on their own.
+const pskGeomCache = new WeakMap();   // report -> { deLat, deLon, latlon, arc }
+export function pskGeom(report, deLat, deLon) {
+  const hit = pskGeomCache.get(report);
+  if (hit && hit.deLat === deLat && hit.deLon === deLon) return hit;
+  const latlon = gridToLatLon(report.rxGrid);
+  const arc = latlon ? greatCircle(deLat, deLon, latlon.lat, latlon.lon, 48) : [];
+  const entry = { deLat, deLon, latlon, arc };
+  pskGeomCache.set(report, entry);
+  return entry;
+}
 function drawPsk(ctx, rc) {
   const { W, H, project, layers, station } = rc;
   const deLat = Number(station.lat), deLon = Number(station.lon);
   const colorBy = rc.pskColorBy || "band";
+  const glow = !rc.motion;      // drop the (expensive) shadow glow while the globe is in motion
   ctx.save();
   ctx.lineWidth = 1.1;
   for (const r of orderPskForDraw(layers.psk?.reports || [], colorBy)) {
-    const ll = gridToLatLon(r.rxGrid);
+    const { latlon: ll, arc } = pskGeom(r, deLat, deLon);
     if (!ll) continue;
     const col = pskReportColor(r, colorBy);
-    ctx.shadowColor = col; ctx.shadowBlur = 9;        // the glow
+    if (glow) { ctx.shadowColor = col; ctx.shadowBlur = 9; }   // the glow (idle only)
     ctx.strokeStyle = hexA(col, 0.55);
-    strokeSegments(ctx, greatCircle(deLat, deLon, ll.lat, ll.lon, 48), project, W, H);
+    strokeSegments(ctx, arc, project, W, H);
     const p = project(ll.lon, ll.lat, W, H);
     if (p.front === false) { ctx.shadowBlur = 0; continue; }   // receiver behind the globe
-    ctx.shadowBlur = 4;                               // dots stay crisp - the glow lives on the lines
+    if (glow) ctx.shadowBlur = 4;                     // dots stay crisp - the glow lives on the lines
     ctx.beginPath(); ctx.arc(p.x, p.y, 2.1, 0, 2 * Math.PI); ctx.fillStyle = col; ctx.fill();
     ctx.shadowBlur = 0;
     ctx.beginPath(); ctx.arc(p.x, p.y, 0.8, 0, 2 * Math.PI); ctx.fillStyle = "#fff"; ctx.fill();  // hot core

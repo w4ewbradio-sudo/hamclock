@@ -394,6 +394,7 @@ function rcFor(W, H) {
     W, H, project, data, layers, station: data.station, now: new Date(), satlib, bounds,
     pskColorBy: pskColorBy(), pskDirection: wp.direction, pskMode: wp.mode, pskBand: wp.band,
     moonTex: moonReady ? moonTex : null,   // reuse the same loaded Image the moon tile uses
+    motion: mapMotion,   // true while the globe is spinning/being dragged: overlays draw cheap (no glow)
   };
 }
 
@@ -586,6 +587,11 @@ function clampMap() {
 // overlays always agree and the raster only rebuilds on a degree step (bounds
 // the per-pixel reproject cost during a spin). Home = station, offsets = 0.
 let globeRotLon = 0, globeRotLat = 0, globeSpin = false, globeGrab = false, globeSingle = false;
+// True while the globe is actively rotating (auto-spin) or being grab-dragged. The
+// PSK overlay reads it (via rc.motion) and skips its shadowBlur glow during motion -
+// the glow is the dominant per-frame cost and is imperceptible on moving lines. On
+// the transition back to rest, one full-quality frame redraws so the glow returns.
+let mapMotion = false;
 try { globeSpin = localStorage.getItem("hcSpin") === "1"; globeSingle = localStorage.getItem("hcGlobeSingle") === "1"; } catch { /* defaults off */ }
 function globeCenter(exact) {
   const st = data.station || {};
@@ -893,7 +899,7 @@ function drawAzimuthal(ctx, W, H) {
   const antiLon = deLon > 0 ? deLon - 180 : deLon + 180;
   const home = globeHome();
   // Single globe: one large disc centered on the map. Dual: DE + antipode side by side.
-  const R = (globeSingle ? Math.min(W / 2, H / 2) : Math.min(W / 4, H / 2)) - 16;
+  const R = Math.max(2, (globeSingle ? Math.min(W / 2, H / 2) : Math.min(W / 4, H / 2)) - 16);
   const discs = globeSingle
     ? [{ lat: deLat, lon: deLon, cx: W / 2, cy: H / 2, label: home ? "DE" : "CENTER" }]
     : [
@@ -970,7 +976,8 @@ function drawGlobe3D(ctx, W, H) {
   if (!g3) { drawAzimuthal(ctx, W, H); return; }   // no WebGL on this machine
   ctx.fillStyle = "#05070d"; ctx.fillRect(0, 0, W, H);
   const ctr = globeCenter(true), home = globeHome();   // fractional center -> smooth rotation
-  const R = Math.min(W / 2, H / 2) - 18, cx = W / 2, cy = H / 2;
+  // floor the radius: a squeezed canvas would send ctx.arc a negative R (throws)
+  const R = Math.max(2, Math.min(W / 2, H / 2) - 18), cx = W / 2, cy = H / 2;
   const sub = subsolarPoint(new Date());
   const style = effectiveStyle();
   const animFr = style === "satellite" && animMode() ? animFrameImg() : null;
@@ -1021,6 +1028,7 @@ function marker(ctx, lon, lat, W, H, color, r) {
 function drawMap() {
   const c = $("hcMap"); if (!c) return;
   const W = c.clientWidth, H = c.clientHeight;
+  if (W < 2 || H < 2) return;   // canvas collapsed mid-layout: nothing to draw into
   const dpr = window.devicePixelRatio || 1;
   const pw = Math.round(W * dpr), ph = Math.round(H * dpr);
   const ctx = c.getContext("2d");
@@ -1399,20 +1407,34 @@ async function init() {
       const dpp = 90 / Math.max(60, R);
       globeRotLon -= dx * dpp;
       globeRotLat = Math.max(-90, Math.min(90, globeRotLat + dy * dpp));
+      mapMotion = true;                         // dragging the sphere: draw cheap (no glow)
       renderView();                             // reveal/hide the HOME chip live
     } else { mapPanX += dx; mapPanY += dy; clampMap(); }
     scheduleDraw();
   });
-  window.addEventListener("mouseup", () => { dragging = false; globeGrab = false; mapEl.classList.remove("hcPanning"); });
+  window.addEventListener("mouseup", () => {
+    const wasGrab = globeGrab;
+    dragging = false; globeGrab = false; mapEl.classList.remove("hcPanning");
+    // Released a grab and the auto-spin isn't going to keep it moving: settle to a
+    // full-quality frame so the glow comes back on the now-static lines.
+    if (wasGrab && !globeSpin && mapMotion) { mapMotion = false; drawMap(); }
+  });
   // Auto-rotate when SPIN is on: a per-frame (rAF) loop with a time-based step, so
   // it's smooth even at slow rates (paused while grabbing / off the globe view).
   let lastSpinT = 0;
   function spinFrame(t) {
-    if (globeSpin && !globeGrab && effectiveProj() === "azimuthal") {
-      if (lastSpinT) { globeRotLon += spinRate * 6.7 * ((t - lastSpinT) / 1000); drawMap(); } // spinRate 1 => ~6.7 deg/s
-      lastSpinT = t;
-    } else lastSpinT = 0;
+    // Re-arm FIRST: if a draw ever throws, the exception must not kill this loop
+    // for the rest of the session (that read as "SPIN is broken" to the operator).
     requestAnimationFrame(spinFrame);
+    if (globeSpin && !globeGrab && effectiveProj() === "azimuthal") {
+      if (lastSpinT) { globeRotLon += spinRate * 6.7 * ((t - lastSpinT) / 1000); mapMotion = true; drawMap(); } // spinRate 1 => ~6.7 deg/s
+      lastSpinT = t;
+    } else {
+      lastSpinT = 0;
+      // Spin just stopped (SPIN toggled off, or projection left the globe) and we're
+      // not mid-grab: settle to one full-quality frame so the glow returns.
+      if (mapMotion && !globeGrab) { mapMotion = false; drawMap(); }
+    }
   }
   requestAnimationFrame(spinFrame);
 
