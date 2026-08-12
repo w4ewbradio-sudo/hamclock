@@ -3,7 +3,7 @@
 A free, **browser-only** ham-shack clock and propagation dashboard. No install,
 no server, no account — open the page, enter your callsign and grid square, done.
 
-**Live:** https://w4ewbradio-sudo.github.io/hamclock/
+**Live:** https://hamclock.w4ewb.com
 
 ## Inspired by HamClock — a tribute
 
