@@ -85,6 +85,24 @@ export function gridToLatLon(grid) {
   return { lat, lon };
 }
 
+// Inverse of gridToLatLon: lat/lon degrees -> Maidenhead locator (4 or 6 chars).
+// Clamps to the valid range (poles land in the last band; lon 180 wraps to -180)
+// so a raw geolocation fix always yields a legal locator. Returns null only for
+// non-finite input.
+export function latLonToGrid(lat, lon, len = 6) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const la = Math.min(89.99999, Math.max(-90, lat)) + 90;
+  const lo = (((lon + 180) % 360) + 360) % 360;   // wrap into [0,360)
+  const A = 65;
+  let g = String.fromCharCode(A + Math.floor(lo / 20), A + Math.floor(la / 10))
+        + String(Math.floor((lo % 20) / 2)) + String(Math.floor(la % 10));
+  if (len >= 6) {
+    g += String.fromCharCode(A + 32 + Math.floor(((lo % 2) * 60) / 5))
+       + String.fromCharCode(A + 32 + Math.floor(((la % 1) * 60) / 2.5));
+  }
+  return g;
+}
+
 // Azimuthal-equidistant projection about (centerLat, centerLon). Returns
 // { x, y, front } in RADIANS of arc: the center maps to the origin, +y is
 // toward north, +x toward local east, the antipode lands on the rim at

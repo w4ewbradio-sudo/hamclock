@@ -9,7 +9,22 @@ import { moonPhase, moonPosition, moonLookAngles } from "./astro-moon.js";
 import { drawMoon, sunEquatorial, brightLimbAngle } from "./hc-moon.js";
 
 export const TILE_W = 240, TILE_H = 140;
+// Tile palette follows the page theme: read the CSS custom properties from :root
+// so html[data-theme] swaps recolor the canvases too. refreshTileTheme() is called
+// by hamclock.js on startup and whenever the theme changes; the literals are the
+// phosphor defaults and the no-DOM fallback (node:test imports this module).
 const C = { bg: "#0a0e18", grid: "#1c2740", green: "#7dd87d", amber: "#e8a33d", red: "#ff5f5f", dim: "#6b7a99" };
+export function refreshTileTheme() {
+  if (typeof document === "undefined") return;
+  const css = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => (css.getPropertyValue(name) || "").trim() || fallback;
+  C.bg = v("--hc-surface", C.bg);
+  C.grid = v("--hc-line", C.grid);
+  C.green = v("--hc-fg", C.green);
+  C.amber = v("--hc-accent", C.amber);
+  C.red = v("--hc-red", C.red);
+  C.dim = v("--hc-muted", C.dim);
+}
 const MONO = "ui-monospace, monospace";
 const DASH = "—";
 
@@ -312,6 +327,58 @@ const TILES = [
       frame(ctx, w, h, "SSTV RX", null, "w4ewb · github");
       fitFont(ctx, "waiting for RX", w * 0.8, 11 * s); ctx.fillStyle = C.dim;
       ctx.textAlign = "center"; ctx.fillText("waiting for RX", w / 2, h / 2); ctx.textAlign = "left";
+    }
+    ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+  } },
+  { id: "rig", title: "RIG", draw(ctx, w, h, td) {
+    const r = td.rig || {}, s = k(h), pad = 8 * s, tx = r.ptt === true;
+    ctx.fillStyle = C.bg; ctx.fillRect(0, 0, w, h);
+    // eyebrow title + TX/RX chip
+    ctx.textAlign = "left";
+    const tSize = fitFont(ctx, "RIG", w * 0.5, 12 * s);
+    ctx.fillStyle = C.dim; ctx.fillText("RIG", pad, pad + tSize);
+    if (r.online) {
+      ctx.textAlign = "right"; fitFont(ctx, "RX", w * 0.3, 11 * s, true);
+      ctx.fillStyle = tx ? C.red : C.green; ctx.fillText(tx ? "TX" : "RX", w - pad, pad + tSize);
+      ctx.textAlign = "left";
+    }
+    let y = pad + tSize + 4 * s;
+    if (r.online && r.hz) {
+      const mhz = (r.hz / 1e6).toFixed(3);
+      const fSize = fitFont(ctx, mhz, w - 2 * pad, 25 * s, true);
+      ctx.fillStyle = tx ? C.red : C.green; ctx.fillText(mhz, pad, y + fSize);
+      y += fSize + 3 * s;
+      const mb = `${r.mode || ""}${r.band ? " · " + r.band : ""}`.trim() || "—";
+      const mSize = fitFont(ctx, mb, w - 2 * pad, 10.5 * s);
+      ctx.fillStyle = C.dim; ctx.fillText(mb, pad, y + mSize);
+      y += mSize + 5 * s;
+      // S-meter: STRENGTH is dB rel S9 (S0=-54 .. S9=0 .. +60). Bar + label.
+      const db = r.meters ? r.meters.s : null;
+      const barH = 5 * s, barW = w - 2 * pad - 22 * s;
+      ctx.fillStyle = C.grid; ctx.fillRect(pad, y, barW, barH);
+      if (db != null) {
+        const frac = Math.max(0, Math.min(1, (db + 54) / 114));
+        ctx.fillStyle = db > 0 ? C.red : C.green; ctx.fillRect(pad, y, barW * frac, barH);
+        const units = Math.max(0, Math.min(9, Math.round((db + 54) / 6)));
+        fitFont(ctx, "S", 20 * s, 9 * s); ctx.fillStyle = C.dim; ctx.textAlign = "right";
+        ctx.fillText(db > 0 ? `S9+${Math.round(db)}` : `S${units}`, w - pad, y + barH);
+        ctx.textAlign = "left";
+      }
+      y += barH + 4 * s;
+    } else {
+      const dSize = fitFont(ctx, "rig offline", w - 2 * pad, 13 * s);
+      ctx.fillStyle = C.dim; ctx.fillText("rig offline", pad, y + dSize + 4 * s);
+      y += dSize + 10 * s;
+    }
+    // waterfall fills the rest
+    const wf = td.rigWf, wfTop = Math.round(y);
+    if (wf && wf.width && wfTop < h - 6 * s) {
+      ctx.save(); ctx.beginPath(); ctx.rect(1, wfTop, w - 2, h - wfTop - 1); ctx.clip();
+      ctx.drawImage(wf, 1, wfTop, w - 2, h - wfTop - 1);
+      ctx.restore();
+    } else if (r.online && wfTop < h - 6 * s) {
+      fitFont(ctx, "spectrum…", w * 0.8, 10 * s); ctx.fillStyle = C.dim;
+      ctx.textAlign = "center"; ctx.fillText("spectrum…", w / 2, (wfTop + h) / 2); ctx.textAlign = "left";
     }
     ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
   } },

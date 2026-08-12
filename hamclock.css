@@ -1,17 +1,88 @@
-/* kiosk */
+/* kiosk + web. All colors/fonts live in custom properties on :root (the phosphor
+   default); html[data-theme="lcars"] swaps the palette. Canvas tiles read the same
+   variables via getComputedStyle (hc-tiles.js), so themes cover them too. */
+:root {
+  --hc-bg:#05070d;
+  --hc-surface:#0a0e18;          /* header/footer/panel-header chrome */
+  --hc-panel:#0a1020;            /* map bg, callsign box, tooltip */
+  --hc-field:#0e1626;            /* inputs, option buttons */
+  --hc-line:#1c2740;
+  --hc-line-soft:#10182a;
+  --hc-line-strong:#2a3960;
+  --hc-fg:#7dd87d;               /* primary value color (phosphor green) */
+  --hc-accent:#e8a33d;           /* secondary value color (amber) */
+  --hc-red:#ff5f5f;
+  --hc-muted:#6b7a99;            /* labels */
+  --hc-dim:#3a4a63;              /* hints, disabled */
+  --hc-text:#c9d6ee;             /* prose */
+  --hc-text-mid:#9fb0c8;
+  --hc-text-low:#8ea0bd;
+  --hc-ok-bg:#10231a;            /* selected (green) chips/options */
+  --hc-ok-line:#2c5c2c;
+  --hc-warn-bg:#231a10;          /* selected (amber) auto/lock states */
+  --hc-warn-line:#7a5a1e;
+  --hc-glow:rgba(125,216,125,.35);
+  --hc-glow-strong:rgba(125,216,125,.5);
+  --hc-font-mono:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  --hc-font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --hc-hdr-radius:0;             /* LCARS rounds panel-header end caps */
+}
+html[data-theme="lcars"] {
+  --hc-bg:#000;
+  --hc-surface:#000;
+  --hc-panel:#0a0a12;
+  --hc-field:#14141f;
+  --hc-line:#33334d;
+  --hc-line-soft:#22222f;
+  --hc-line-strong:#4d4d70;
+  --hc-fg:#fc6;                  /* gold */
+  --hc-accent:#f96;              /* orange */
+  --hc-red:#c66;
+  --hc-muted:#99c;               /* periwinkle */
+  --hc-dim:#669;
+  --hc-text:#e8e4dc;
+  --hc-text-mid:#ccc4b8;
+  --hc-text-low:#b3aca0;
+  --hc-ok-bg:#332b14;
+  --hc-ok-line:#7a642e;
+  --hc-warn-bg:#33201a;
+  --hc-warn-line:#7a4d3d;
+  --hc-glow:rgba(255,204,102,.3);
+  --hc-glow-strong:rgba(255,204,102,.5);
+  --hc-font-ui:"Antonio","Arial Narrow",Arial,sans-serif;
+  --hc-hdr-radius:14px;
+}
+/* LCARS signature chrome: black-on-orange pill headers, gold callsign cap. */
+html[data-theme="lcars"] .hcPanel h2,
+html[data-theme="lcars"] .hcSetHead {
+  background:var(--hc-accent); color:#000;
+  border-radius:0 var(--hc-hdr-radius) var(--hc-hdr-radius) 0;
+  margin-right:10px; font-weight:700;
+  font-family:var(--hc-font-ui);
+}
+html[data-theme="lcars"] .hcSetHead .hcSetX { color:#000; }
+html[data-theme="lcars"] .hcCall {
+  border:none; border-left:12px solid var(--hc-accent);
+  border-radius:0 var(--hc-hdr-radius) var(--hc-hdr-radius) 0;
+  background:var(--hc-panel);
+}
+html[data-theme="lcars"] .hcChip,
+html[data-theme="lcars"] .hcSetOpt,
+html[data-theme="lcars"] .hcTileRestore { border-radius:var(--hc-hdr-radius); }
+
 html, body, #hc { height:100%; margin:0; }
 
 * { box-sizing:border-box; }
 
 body {
-  background:#05070d;
-  color:#e8a33d;
-  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  background:var(--hc-bg);
+  color:var(--hc-accent);
+  font-family:var(--hc-font-ui);
   overflow:hidden;
 }
 
 .mono, #hcUtc, #hcUtcDate, #hcLocal, #hcDe, #hcSpots, #hcUpdated {
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  font-family:var(--hc-font-mono);
 }
 
 #hc {
@@ -25,15 +96,15 @@ body {
   align-items:center;
   gap:24px;
   padding:10px 20px;
-  background:#0a0e18;
-  border-bottom:1px solid #1c2740;
+  background:var(--hc-surface);
+  border-bottom:1px solid var(--hc-line);
 }
 .hcCall {
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  font-family:var(--hc-font-mono);
   font-weight:700;
   font-size:clamp(28px,5vw,64px);
   line-height:1;
-  color:#7dd87d;
+  color:var(--hc-fg);
   letter-spacing:.04em;
 }
 .hcClocks {
@@ -43,23 +114,23 @@ body {
   flex:1;
 }
 .hcUtc, .hcLocal {
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  font-family:var(--hc-font-mono);
   font-weight:700;
   font-size:clamp(28px,5vw,64px);
   line-height:1;
-  color:#7dd87d;
+  color:var(--hc-fg);
 }
 .hcUtc b {
   font-size:clamp(12px,1.4vw,18px);
-  color:#e8a33d;
+  color:var(--hc-accent);
   font-weight:600;
   margin-left:6px;
 }
-.hcLocal { color:#e8a33d; font-size:clamp(18px,2.6vw,32px); }
+.hcLocal { color:var(--hc-accent); font-size:clamp(18px,2.6vw,32px); }
 .hcUtcDate {
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  font-family:var(--hc-font-mono);
   font-size:clamp(11px,1.2vw,14px);
-  color:#6b7a99;
+  color:var(--hc-muted);
   letter-spacing:.08em;
   text-transform:uppercase;
 }
@@ -73,20 +144,20 @@ body {
   width:100%;
   height:100%;
   display:block;
-  background:#0a1020;
+  background:var(--hc-panel);
 }
 #hcSide {
   display:flex;
   flex-direction:column;
   min-height:0;
-  border-left:1px solid #1c2740;
-  background:#05070d;
+  border-left:1px solid var(--hc-line);
+  background:var(--hc-bg);
 }
 .hcPanel {
   display:flex;
   flex-direction:column;
   min-height:0;
-  border-bottom:1px solid #1c2740;
+  border-bottom:1px solid var(--hc-line);
 }
 .hcPanel h2 {
   margin:0;
@@ -94,14 +165,14 @@ body {
   font-size:11px;
   letter-spacing:.14em;
   text-transform:uppercase;
-  color:#6b7a99;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
-  border-bottom:1px solid #1c2740;
-  background:#0a0e18;
+  color:var(--hc-muted);
+  font-family:var(--hc-font-mono);
+  border-bottom:1px solid var(--hc-line);
+  background:var(--hc-surface);
 }
 .hcBody {
   padding:10px 12px;
-  color:#7dd87d;
+  color:var(--hc-fg);
   font-size:13px;
   overflow-y:auto;
 }
@@ -116,14 +187,14 @@ body {
 /* ---- footer strip ---- */
 #hcFoot {
   padding:6px 20px;
-  background:#0a0e18;
-  border-top:1px solid #1c2740;
-  color:#6b7a99;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  background:var(--hc-surface);
+  border-top:1px solid var(--hc-line);
+  color:var(--hc-muted);
+  font-family:var(--hc-font-mono);
   font-size:11px;
   letter-spacing:.04em;
 }
-#hcUpdated { color:#e8a33d; }
+#hcUpdated { color:var(--hc-accent); }
 
 /* ---- panel content helpers ---- */
 .hcKv {
@@ -132,25 +203,25 @@ body {
   align-items:baseline;
   gap:12px;
   padding:3px 0;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  font-family:var(--hc-font-mono);
 }
-.hcKv span { color:#6b7a99; font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
-.hcKv b { color:#7dd87d; font-size:13px; font-weight:600; }
+.hcKv span { color:var(--hc-muted); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+.hcKv b { color:var(--hc-fg); font-size:13px; font-weight:600; }
 
 .hcSpot {
   display:flex;
   align-items:baseline;
   gap:8px;
   padding:4px 0;
-  border-bottom:1px solid #10182a;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  border-bottom:1px solid var(--hc-line-soft);
+  font-family:var(--hc-font-mono);
   font-size:12px;
-  color:#e8a33d;
+  color:var(--hc-accent);
 }
-.hcSpot b { color:#7dd87d; }
-.hcBand { color:#e8a33d; opacity:.85; }
-.hcCty { color:#6b7a99; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.hcT { color:#6b7a99; font-size:11px; }
+.hcSpot b { color:var(--hc-fg); }
+.hcBand { color:var(--hc-accent); opacity:.85; }
+.hcCty { color:var(--hc-muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hcT { color:var(--hc-muted); font-size:11px; }
 
 /* ---- v2: map overlay chrome (chips, cycle dots, legend, context panel) ---- */
 #hcMapWrap { position:relative; min-width:0; min-height:0; overflow:hidden; }
@@ -160,127 +231,127 @@ body {
 /* ---- settings panel (opens from the gear in #hcView) ---- */
 #hcSettings {
   position:absolute; top:50px; right:12px; z-index:6; display:none; width:280px; max-height:calc(100% - 70px);
-  overflow-y:auto; background:rgba(6,10,20,.97); border:1px solid #2a3960; border-radius:8px;
-  box-shadow:0 12px 40px rgba(0,0,0,.6); color:#c9d6ee;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  overflow-y:auto; background:var(--hc-bg); border:1px solid var(--hc-line-strong); border-radius:8px;
+  box-shadow:0 12px 40px rgba(0,0,0,.6); color:var(--hc-text);
+  font-family:var(--hc-font-mono);
 }
 .hcSetHead {
   display:flex; align-items:center; justify-content:space-between;
-  padding:9px 12px; border-bottom:1px solid #1c2740; position:sticky; top:0; background:rgba(6,10,20,.99);
-  font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:#7dd87d;
+  padding:9px 12px; border-bottom:1px solid var(--hc-line); position:sticky; top:0; background:var(--hc-bg);
+  font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:var(--hc-fg);
 }
-.hcSetX { background:none; border:none; color:#6b7a99; font-size:18px; line-height:1; cursor:pointer; padding:0 2px; }
-.hcSetX:hover { color:#e8a33d; }
-.hcSetSec { padding:8px 12px 10px; border-bottom:1px solid #12182a; }
+.hcSetX { background:none; border:none; color:var(--hc-muted); font-size:18px; line-height:1; cursor:pointer; padding:0 2px; }
+.hcSetX:hover { color:var(--hc-accent); }
+.hcSetSec { padding:8px 12px 10px; border-bottom:1px solid var(--hc-line-soft); }
 .hcSetSec h4 {
-  margin:0 0 7px; font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:#6b7a99;
+  margin:0 0 7px; font-size:10px; letter-spacing:.14em; text-transform:uppercase; color:var(--hc-muted);
   display:flex; align-items:center; justify-content:space-between; font-weight:600;
 }
-.hcSetAll { background:none; border:none; color:#e8a33d; font-size:9.5px; letter-spacing:.06em; text-transform:uppercase; cursor:pointer; }
+.hcSetAll { background:none; border:none; color:var(--hc-accent); font-size:9.5px; letter-spacing:.06em; text-transform:uppercase; cursor:pointer; }
 .hcSetGrid { display:grid; grid-template-columns:1fr 1fr; gap:5px; }
 .hcSetList { display:flex; flex-direction:column; gap:5px; }
 .hcSetRow { display:flex; gap:5px; }
 .hcSetRowMain { flex:1; min-width:0; }
 .hcSetLock {
   flex:0 0 auto; width:30px; font-size:12px; line-height:1; cursor:pointer;
-  background:#0e1626; color:#3a4a63; border:1px solid #1c2740; border-radius:6px; opacity:.8;
+  background:var(--hc-field); color:var(--hc-dim); border:1px solid var(--hc-line); border-radius:6px; opacity:.8;
 }
-.hcSetLock:hover { color:#8ea0bd; }
-.hcSetLock.on { color:#e8a33d; border-color:#7a5a1e; background:#231a10; opacity:1; }
+.hcSetLock:hover { color:var(--hc-text-low); }
+.hcSetLock.on { color:var(--hc-accent); border-color:var(--hc-warn-line); background:var(--hc-warn-bg); opacity:1; }
 .hcSetChips { display:flex; flex-wrap:wrap; gap:5px; }
 .hcSetChips .hcSetOpt { flex:1 1 auto; text-align:center; min-width:44px; }
-.hcSetLbl { font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:#6b7a99; margin:8px 0 4px; }
+.hcSetLbl { font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--hc-muted); margin:8px 0 4px; }
 .hcSetInput {
   width:100%; box-sizing:border-box; font-family:inherit; font-size:13px; font-weight:600; letter-spacing:.06em;
-  text-transform:uppercase; text-align:center; color:#7dd87d; background:#0e1626;
-  border:1px solid #2a3960; border-radius:6px; padding:7px 9px;
+  text-transform:uppercase; text-align:center; color:var(--hc-fg); background:var(--hc-field);
+  border:1px solid var(--hc-line-strong); border-radius:6px; padding:7px 9px;
 }
-.hcSetInput:focus { outline:none; border-color:#2c5c2c; background:#10231a; }
-.hcSetUrl { text-transform:none; letter-spacing:0; font-size:11px; text-align:left; color:#8ea0bd; }
-.hcSetHint { font-size:10px; color:#3a4a63; margin:4px 0 0; font-family:inherit; }
+.hcSetInput:focus { outline:none; border-color:var(--hc-ok-line); background:var(--hc-ok-bg); }
+.hcSetUrl { text-transform:none; letter-spacing:0; font-size:11px; text-align:left; color:var(--hc-text-low); }
+.hcSetHint { font-size:10px; color:var(--hc-dim); margin:4px 0 0; font-family:inherit; }
 /* ---- About panel (shares the settings chrome, centered + wider) ---- */
 #hcAbout {
   position:absolute; top:50px; left:50%; transform:translateX(-50%); z-index:7; display:none;
   width:min(560px, 92%); max-height:calc(100% - 70px); overflow-y:auto;
-  background:rgba(6,10,20,.97); border:1px solid #2a3960; border-radius:8px;
-  box-shadow:0 12px 40px rgba(0,0,0,.6); color:#c9d6ee;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  background:var(--hc-bg); border:1px solid var(--hc-line-strong); border-radius:8px;
+  box-shadow:0 12px 40px rgba(0,0,0,.6); color:var(--hc-text);
+  font-family:var(--hc-font-mono);
 }
 #hcAbout .hcSetHead { font-size:13px; }
-.hcAboutBody { font-size:12px; line-height:1.55; color:#9fb0c8; }
-.hcAboutBody b { color:#7dd87d; font-weight:600; }
-.hcAboutBody em { color:#e8a33d; font-style:normal; }
+.hcAboutBody { font-size:12px; line-height:1.55; color:var(--hc-text-mid); }
+.hcAboutBody b { color:var(--hc-fg); font-weight:600; }
+.hcAboutBody em { color:var(--hc-accent); font-style:normal; }
 .hcSetOpt {
   font-family:inherit; font-size:11.5px; text-align:left; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-  background:#0e1626; color:#8ea0bd; border:1px solid #1c2740; border-radius:6px; padding:6px 9px; cursor:pointer;
+  background:var(--hc-field); color:var(--hc-text-low); border:1px solid var(--hc-line); border-radius:6px; padding:6px 9px; cursor:pointer;
 }
-.hcSetOpt:hover { border-color:#2a3960; }
-.hcSetOpt.on { color:#7dd87d; border-color:#2c5c2c; background:#10231a; }
-.hcSetOpt.hcSetAuto.on { color:#e8a33d; border-color:#7a5a1e; background:#231a10; }
+.hcSetOpt:hover { border-color:var(--hc-line-strong); }
+.hcSetOpt.on { color:var(--hc-fg); border-color:var(--hc-ok-line); background:var(--hc-ok-bg); }
+.hcSetOpt.hcSetAuto.on { color:var(--hc-accent); border-color:var(--hc-warn-line); background:var(--hc-warn-bg); }
 .hcSetList .hcSetOpt.on::before { content:"\25cf  "; }
-.hcSetList .hcSetOpt::before { content:"\25cb  "; color:#6b7a99; }
+.hcSetList .hcSetOpt::before { content:"\25cb  "; color:var(--hc-muted); }
 .hcChip {
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  font-family:var(--hc-font-mono);
   font-size:11px; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
-  background:rgba(10,14,24,.85); color:#6b7a99;
-  border:1px solid #1c2740; border-radius:12px; padding:3px 10px; cursor:pointer;
+  background:var(--hc-surface); color:var(--hc-muted);
+  border:1px solid var(--hc-line); border-radius:12px; padding:3px 10px; cursor:pointer;
 }
-.hcChip.on { color:#7dd87d; border-color:#2c5c2c; }
-.hcChip.live { box-shadow:0 0 6px rgba(125,216,125,.5); }
+.hcChip.on { color:var(--hc-fg); border-color:var(--hc-ok-line); }
+.hcChip.live { box-shadow:0 0 6px var(--hc-glow-strong); }
 .hcChip.pin { box-shadow:inset 0 -2px 0 currentColor; }   /* pinned: stays on while AUTO cycles */
-.hcChip.hcAutoChip.on { color:#e8a33d; border-color:#7a5a1e; }
+.hcChip.hcAutoChip.on { color:var(--hc-accent); border-color:var(--hc-warn-line); }
 #hcDots { position:absolute; bottom:84px; left:16px; display:flex; gap:5px; z-index:3; }
-#hcDots .dot { width:6px; height:6px; border-radius:50%; background:#1c2740; }
-#hcDots .dot.on { background:#7dd87d; }
+#hcDots .dot { width:6px; height:6px; border-radius:50%; background:var(--hc-line); }
+#hcDots .dot.on { background:var(--hc-fg); }
 #hcLegend {
   position:absolute; left:12px; top:12px; z-index:2; display:none;
-  background:rgba(5,7,13,.8); border:1px solid #1c2740; border-radius:4px;
-  padding:6px 10px; color:#6b7a99;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace; font-size:11px;
+  background:var(--hc-surface); border:1px solid var(--hc-line); border-radius:4px;
+  padding:6px 10px; color:var(--hc-muted);
+  font-family:var(--hc-font-mono); font-size:11px;
 }
 .hcAttr {
-  color:#6b7a99; font-size:10px; margin:6px 0 0;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  color:var(--hc-muted); font-size:10px; margin:6px 0 0;
+  font-family:var(--hc-font-mono);
 }
 
-.hcMuted { color:#6b7a99; font-style:italic; margin:0; }
+.hcMuted { color:var(--hc-muted); font-style:italic; margin:0; }
 
 /* ---- v3: header tile row ---- */
 .hcCallBlock { display:flex; align-items:center; gap:18px; flex-shrink:0; }
 .hcCall {
-  border:1px solid #1c2740; border-radius:6px; padding:4px 12px;
-  background:#0a1020; text-shadow:0 0 12px rgba(125,216,125,.35);
+  border:1px solid var(--hc-line); border-radius:6px; padding:4px 12px;
+  background:var(--hc-panel); text-shadow:0 0 12px var(--hc-glow);
 }
 .hcCallBlock { flex-direction:column; align-items:flex-start; gap:8px; }
 .hcMode {
   display:flex; align-items:baseline; gap:8px;
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+  font-family:var(--hc-font-mono);
 }
-.hcModeK { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:#6b7a99; }
-#hcModeV { font-size:clamp(18px,2.4vw,30px); font-weight:700; letter-spacing:.04em; color:#7dd87d; }
+.hcModeK { font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--hc-muted); }
+#hcModeV { font-size:clamp(18px,2.4vw,30px); font-weight:700; letter-spacing:.04em; color:var(--hc-fg); }
 .hcClocks { flex:initial; flex-direction:column; align-items:flex-start; gap:3px; }
 .hcMjd {
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
-  font-size:clamp(10px,1.1vw,13px); color:#6b7a99; letter-spacing:.06em;
+  font-family:var(--hc-font-mono);
+  font-size:clamp(10px,1.1vw,13px); color:var(--hc-muted); letter-spacing:.06em;
 }
 #hcTop { align-items:center; gap:22px; padding:14px 20px; }
 #hcTiles {
   display:flex; flex-wrap:wrap; gap:8px; flex:1;
   justify-content:center; align-content:flex-start; align-items:flex-start; min-width:0;
 }
-canvas.hcTile { background:#0a0e18; border-radius:5px; }
+canvas.hcTile { background:var(--hc-surface); border-radius:5px; }
 .hcTileRestore {
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
-  font-size:11px; font-weight:600; color:#6b7a99;
-  background:rgba(10,14,24,.85); border:1px solid #1c2740; border-radius:12px;
+  font-family:var(--hc-font-mono);
+  font-size:11px; font-weight:600; color:var(--hc-muted);
+  background:var(--hc-surface); border:1px solid var(--hc-line); border-radius:12px;
   padding:3px 10px; cursor:pointer; align-self:center;
 }
 /* ---- v3: map style/projection chips (populated by Task 11/12) ---- */
 #hcTooltip {
   position:fixed; display:none; z-index:50; max-width:300px;
-  background:#0a1020; border:1px solid #2a3960; border-radius:6px;
-  padding:8px 11px; color:#c9d6ee;
-  font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
+  background:var(--hc-panel); border:1px solid var(--hc-line-strong); border-radius:6px;
+  padding:8px 11px; color:var(--hc-text);
+  font-family:var(--hc-font-ui);
   font-size:12.5px; line-height:1.45;
   box-shadow:0 8px 24px rgba(0,0,0,.6); pointer-events:none;
 }
@@ -299,14 +370,117 @@ canvas.hcTile { cursor:help; }
 .hcCardWrap { position:relative; }
 .hcCardMenu {
   position:absolute; top:calc(100% + 6px); right:0; z-index:5; min-width:150px;
-  background:rgba(6,10,20,.96); border:1px solid #2a3960; border-radius:6px;
+  background:var(--hc-bg); border:1px solid var(--hc-line-strong); border-radius:6px;
   padding:5px; display:flex; flex-direction:column; gap:2px; box-shadow:0 10px 30px rgba(0,0,0,.6);
 }
 .hcCardOpt {
-  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace; font-size:11.5px;
-  text-align:left; background:transparent; color:#9fb0c8; border:none; border-radius:4px;
+  font-family:var(--hc-font-mono); font-size:11.5px;
+  text-align:left; background:transparent; color:var(--hc-text-mid); border:none; border-radius:4px;
   padding:5px 9px; cursor:pointer; white-space:nowrap;
 }
-.hcCardOpt:hover { background:#12203a; }
-.hcCardOpt.on { color:#7dd87d; }
-.hcCardAll { margin-top:4px; border-top:1px solid #1c2740; color:#e8a33d; }
+.hcCardOpt:hover { background:var(--hc-field); }
+.hcCardOpt.on { color:var(--hc-fg); }
+.hcCardAll { margin-top:4px; border-top:1px solid var(--hc-line); color:var(--hc-accent); }
+
+/* ---- v4: first-run welcome (standalone only; injected by hamclock.js) ---- */
+#hcWelcome {
+  position:fixed; inset:0; z-index:40; display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.72); backdrop-filter:blur(3px); padding:18px;
+}
+.hcWelcomePanel {
+  width:min(430px, 100%); background:var(--hc-bg); border:1px solid var(--hc-line-strong);
+  border-radius:10px; box-shadow:0 18px 60px rgba(0,0,0,.7); overflow:hidden;
+  font-family:var(--hc-font-mono); color:var(--hc-text);
+}
+.hcWelcomeTitle {
+  padding:14px 18px 12px; background:var(--hc-surface); border-bottom:1px solid var(--hc-line);
+  color:var(--hc-fg); font-size:17px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+  text-shadow:0 0 12px var(--hc-glow);
+}
+html[data-theme="lcars"] .hcWelcomeTitle {
+  background:var(--hc-accent); color:#000;
+  border-radius:0 var(--hc-hdr-radius) var(--hc-hdr-radius) 0; margin-right:12px;
+  font-family:var(--hc-font-ui); text-shadow:none;
+}
+.hcWelcomeBody { padding:14px 18px 18px; }
+.hcWelcomePitch { margin:0 0 14px; font-size:12.5px; line-height:1.55; color:var(--hc-text-mid); }
+.hcWelcomePitch b { color:var(--hc-fg); font-weight:600; }
+.hcWelcomeRow { display:flex; gap:8px; margin-top:8px; }
+.hcWelcomeRow .hcSetInput { text-align:left; font-size:15px; padding:10px 12px; }
+.hcWelcomeBtn {
+  font-family:inherit; font-size:13px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+  border-radius:6px; padding:11px 14px; cursor:pointer; min-height:44px;
+}
+.hcWelcomeGo {
+  width:100%; margin-top:14px; color:#04120a; background:var(--hc-fg); border:1px solid var(--hc-fg);
+}
+.hcWelcomeGo:disabled { opacity:.4; cursor:default; }
+.hcWelcomeLoc {
+  flex:0 0 auto; color:var(--hc-accent); background:var(--hc-warn-bg); border:1px solid var(--hc-warn-line);
+}
+.hcWelcomeSkip {
+  display:block; width:100%; margin-top:10px; text-align:center; background:none; border:none;
+  color:var(--hc-muted); font-family:inherit; font-size:11px; letter-spacing:.06em;
+  text-transform:uppercase; cursor:pointer; padding:8px;
+}
+.hcWelcomeSkip:hover { color:var(--hc-text-low); }
+.hcWelcomeErr { color:var(--hc-red); font-size:11px; margin:6px 0 0; min-height:14px; }
+.hcWelcomeHint { color:var(--hc-dim); font-size:10.5px; margin:6px 0 0; line-height:1.5; }
+
+/* ---- v4: mobile, map-first (no effect on the kiosk's 1080p viewport) ---- */
+@media (max-width: 900px) {
+  html, body, #hc { height:auto; }
+  body { overflow:auto; }
+  /* Flatten the header AND the main grid so callsign block, map, tile row, and
+     side panels all become direct #hc grid items that `order` can rearrange into
+     the map-first stack: clock, map, tiles, panels, footer. */
+  #hcTop, #hcMain { display:contents; }
+  .hcCallBlock {
+    order:1; flex-direction:row; align-items:center; flex-wrap:wrap; gap:10px 14px;
+    padding:8px 12px; background:var(--hc-surface); border-bottom:1px solid var(--hc-line);
+  }
+  #hcMapWrap { order:2; height:58vh; }
+  #hcTiles { order:3; }
+  #hcSide { order:4; }
+  #hcFoot { order:5; }
+  .hcCall { font-size:26px; padding:3px 9px; }
+  .hcClocks { flex-direction:row; align-items:baseline; gap:12px; flex:1; min-width:0; }
+  .hcUtc { font-size:24px; }
+  .hcLocal { font-size:16px; }
+  .hcUtcDate, .hcMjd { display:none; }
+  .hcMode { margin-left:auto; }
+  #hcModeV { font-size:16px; }
+
+  #hcSide { border-left:none; border-top:1px solid var(--hc-line); }
+  .hcSpotsPanel .hcBody { max-height:40vh; }
+
+  /* Tile sizing/columns stay with renderTiles() (inline styles, width-aware);
+     CSS only dresses the strip. */
+  #hcTiles { padding:10px 12px; background:var(--hc-surface); border-top:1px solid var(--hc-line); }
+
+  /* touch targets */
+  .hcChip { padding:9px 14px; font-size:12px; }
+  .hcSetOpt { padding:10px 11px; font-size:12.5px; }
+  .hcSetLock { width:40px; }
+  #hcMapCtl { bottom:14px; }
+  #hcDots { bottom:64px; }
+
+  /* settings + about become full-screen sheets */
+  #hcSettings, #hcAbout {
+    position:fixed; inset:0; top:0; left:0; right:0; transform:none;
+    width:100%; max-height:100%; border-radius:0; border:none; z-index:30;
+  }
+  .hcSetHead { padding:14px 16px; font-size:14px; }
+  .hcSetX { font-size:26px; padding:2px 10px; }
+
+  #hc.hcNoCards #hcTiles { display:none; }
+  #hc.hcBig #hcSide { display:none; }
+}
+@media (max-width: 480px) {
+  #hcMapWrap { height:52vh; }
+  .hcMode { display:none; }
+  .hcCall { font-size:22px; }
+  .hcUtc { font-size:20px; }
+  .hcLocal { font-size:14px; }
+  #hcFoot { font-size:9.5px; padding:6px 12px; }
+}

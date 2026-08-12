@@ -1,11 +1,12 @@
 import { subsolarPoint, terminatorLat, sunTimes, isNight } from "./astro.js";
 import { listOverlays, drawOverlay, overlayPanel, ATTRIBUTIONS } from "./hc-overlays.js";
-import { drawTile, listTiles, TILE_W, TILE_H } from "./hc-tiles.js";
-import { azimuthal, azimuthalInverse, gridToLatLon } from "./geo.js";
+import { drawTile, listTiles, TILE_W, TILE_H, refreshTileTheme } from "./hc-tiles.js";
+import { azimuthal, azimuthalInverse, gridToLatLon, latLonToGrid } from "./geo.js";
 import { makeGlobe3D, makeProjector } from "./hc-globe3d.js";
 import { filterPskReports } from "./hc-psk.js";
 import { completeSatDate } from "./hc-gibs.js";
 import { parseDomainRanges, lastTimes, unionTimes, nearestAtOrBefore, flipbookDates, goesUrl, viirsUrl, footprintPoints, fadeAlpha, freshEnough, whiteFrac } from "./hc-anim.js";
+import { startRig, rigState } from "./hc-rig.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 // Standalone (HamClock Web): a static build served from GitHub Pages with no local
@@ -434,10 +435,12 @@ function tileData() {
     bandsImg: STANDALONE && bandsReady && !hasBands ? bandsImg : null,
     ssnAttr: STANDALONE ? "NOAA SWPC" : null,   // web SSN comes from NOAA daily indices, not SILSO
     psk: layers.psk?.reports || [],
+    rig: rigState, rigWf: rigState.wf,
   };
 }
 // Hover-tooltip copy: what each card / map control is showing.
 const TILE_INFO = {
+  rig: "Rig: your FT-710's live frequency, mode, S-meter and a receive-audio waterfall, straight from the shack. Only in the Control Center HamClock.",
   ssn: "Sunspot Number (SILSO / Royal Obs. Belgium): today's count plus a ~40-day trend. Higher = more solar activity and generally better HF.",
   flux: "10.7 cm Solar Flux (NOAA SWPC): the classic propagation index. Under 70 is poor, 100-150 good, 150+ excellent for the high bands.",
   kp: "Planetary Kp (NOAA SWPC): geomagnetic activity 0-9 over the last 7 days. Green = quiet/good; red (5+) = a geomagnetic storm that degrades HF.",
@@ -481,7 +484,7 @@ function renderTiles() {
   const known = listTiles();
   const saved = (loadTileOrder() || data.ui?.tileOrder || known).filter((id) => known.includes(id));
   const order = [...saved, ...known.filter((id) => !saved.includes(id))];   // append any new tiles
-  const want = order.filter((id) => !hiddenTiles.has(id) && !(id === "sstv" && !sstvUrl()));
+  const want = order.filter((id) => !hiddenTiles.has(id) && !(id === "sstv" && !sstvUrl()) && !(id === "rig" && STANDALONE));
   for (const el of [...host.querySelectorAll("canvas.hcTile")]) {
     if (!want.includes(el.dataset.id)) el.remove();
   }
@@ -490,7 +493,7 @@ function renderTiles() {
   // instead of stretching the survivors ever wider/taller. Aspect from TILE_W/H.
   const GAP = 8, ASPECT = TILE_W / TILE_H;
   const avail = host.clientWidth || (TILE_W * 5);
-  const n = want.length || 1;
+  const nTiles = want.length || 1;
   // Tile SIZE depends only on the available width, never on the count, so the row
   // stays the same size whether 10 cards show or 3 (fewer tiles don't balloon).
   // `perRow` natural-width tiles fill the row; fewer tiles just use fewer columns
@@ -498,9 +501,16 @@ function renderTiles() {
   // per row so both rows stay uniform (flexbox would squeeze in an extra one).
   const REF = 200;   // target column width: sets tiles-per-full-row (count-independent)
   const perRow = Math.max(1, Math.floor((avail + GAP) / (REF + GAP)));
-  const tileW = Math.max(120, Math.floor((avail - (perRow - 1) * GAP) / perRow));
-  const rows = Math.ceil(n / perRow);
-  const cols = Math.max(1, Math.ceil(n / rows));
+  // The rig tile is double-width (spans 2 columns), so it packs as an extra cell -
+  // otherwise its 2nd cell spills onto a new row. Row count is still decided by the
+  // tile count; the tiles just shrink (never below REF) to fit the extra cell.
+  const rigDouble = want.includes("rig") && perRow >= 2;
+  const cells = nTiles + (rigDouble ? 1 : 0);
+  const rows = Math.max(1, Math.ceil(nTiles / perRow));
+  const cols = Math.max(1, Math.ceil(cells / rows));
+  const natW = Math.floor((avail - (perRow - 1) * GAP) / perRow); // REF-target (no balloon)
+  const fitW = Math.floor((avail - (cols - 1) * GAP) / cols);     // shrink to keep `cols` on one row
+  const tileW = Math.max(110, Math.min(natW, fitW));
   // Height: a reduced number of rows grows TALLER to fill the vertical band the
   // full set would occupy (capped at 2 rows) - so a single row uses the freed
   // vertical space instead of sitting short. Width stays constant (no sideways
@@ -529,10 +539,15 @@ function renderTiles() {
       el.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; });
       el.addEventListener("drop", (e) => { e.preventDefault(); if (dragTileId && dragTileId !== el.dataset.id) reorderTiles(dragTileId, el.dataset.id); });
     }
-    el.style.width = tileW + "px";
+    // The rig tile is double-width (a waterfall wants the room) when the row has
+    // at least 2 columns to give; otherwise it falls back to a normal single cell.
+    const dbl = id === "rig" && perRow >= 2;
+    const w = dbl ? tileW * 2 + GAP : tileW;
+    el.style.gridColumn = dbl ? "span 2" : "";
+    el.style.width = w + "px";
     el.style.height = tileH + "px";
     host.appendChild(el);            // appendChild also reorders an existing node
-    drawTile(id, el, td, tileW, tileH);
+    drawTile(id, el, td, w, tileH);
   }
   // (restore-hidden control lives in the #hcView chip row now, so it never adds a
   // grid cell that would change the tile row's height)
@@ -540,6 +555,16 @@ function renderTiles() {
   // fewer tiles => a bigger map (covers dblclick-hide, restore, and the picker).
   const nowH = host.offsetHeight;
   if (nowH !== lastTilesH) { lastTilesH = nowH; requestAnimationFrame(() => drawMap()); }
+}
+
+// Repaint ONLY the rig tile (driven by the waterfall SSE ~20x/sec) so we never run
+// a full renderTiles() per spectrum frame. No-op if the tile isn't currently shown.
+function redrawRigTile() {
+  const el = document.querySelector('#hcTiles canvas.hcTile[data-id="rig"]');
+  if (!el) return;
+  const w = parseInt(el.style.width, 10) || TILE_W;
+  const h = parseInt(el.style.height, 10) || TILE_H;
+  drawTile("rig", el, tileData(), w, h);
 }
 
 function project(lon, lat, W, H) { return { x: (lon + 180) / 360 * W, y: (90 - lat) / 180 * H }; }
@@ -559,6 +584,29 @@ function reorderTiles(fromId, toId) {
 // ---- personalization (all localStorage-backed; edited in the settings panel) ----
 const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } };
 const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* session-only */ } };
+// Shareable pre-config (web): ?call=W4EWB&grid=EM78 persists the station, then the
+// params are scrubbed from the address bar so a bookmark/copy of the URL is clean.
+// Must run before customCall/webStation read localStorage below.
+const GRID_RE = /^[A-R]{2}[0-9]{2}([A-X]{2})?$/;
+if (STANDALONE) (() => {
+  try {
+    const q = new URLSearchParams(location.search);
+    const call = (q.get("call") || "").trim().toUpperCase();
+    const grid = (q.get("grid") || "").trim().toUpperCase();
+    if (call && /^[A-Z0-9/]{3,12}$/.test(call)) lsSet("hcCall", call);
+    if (GRID_RE.test(grid)) lsSet("hcGrid", grid);
+    if ((call || grid) && history.replaceState) history.replaceState(null, "", location.pathname);
+  } catch { /* malformed URL: ignore */ }
+})();
+// Theme: phosphor (default) or LCARS. The attribute drives the CSS variable swap;
+// the canvas tiles re-read their palette via refreshTileTheme().
+let theme = lsGet("hcTheme", "") === "lcars" ? "lcars" : "";
+function applyTheme() {
+  if (theme) document.documentElement.dataset.theme = theme;
+  else delete document.documentElement.dataset.theme;
+  refreshTileTheme();
+}
+applyTheme();
 let customCall = lsGet("hcCall", "").trim();
 let timeFmt = lsGet("hcTimeFmt", "24") === "12" ? "12" : "24";     // local clock: 24-hour vs 12-hour
 let autoSec = Math.max(3, Math.min(120, +lsGet("hcAutoSec", 15) || 15));   // AUTO overlay-cycle period
@@ -715,6 +763,9 @@ function renderSettings() {
     + `<div class="hcSetSec"><h4>${STANDALONE ? "Station" : "Display"}</h4>`
       + `<input class="hcSetInput" data-call type="text" maxlength="12" placeholder="Callsign" value="${esc(customCall)}">`
       + stationRows
+      + `<div class="hcSetLbl">Theme</div><div class="hcSetChips">`
+        + `<button class="hcSetOpt${theme === "" ? " on" : ""}" data-theme="phosphor">Phosphor</button>`
+        + `<button class="hcSetOpt${theme === "lcars" ? " on" : ""}" data-theme="lcars">LCARS</button></div>`
       + `<div class="hcSetLbl">Local time</div><div class="hcSetChips">${timeBtns}</div>`
       + `<div class="hcSetLbl">Auto-cycle every</div><div class="hcSetChips">${autoBtns}</div>`
       + `<div class="hcSetLbl">Globe spin</div><div class="hcSetChips">${spinBtns}</div>`
@@ -729,6 +780,68 @@ function renderSettings() {
       + `<button class="hcSetOpt hcSetAuto${auto ? " on" : ""}" data-id="__auto" style="width:100%;margin-bottom:6px">${auto ? "AUTO cycle · on" : "AUTO cycle · off"}</button>`
       + `<div class="hcSetList">${ovRows}</div></div>`
     + `<div class="hcSetSec"><h4>Sun image</h4><div class="hcSetList">${sunRows}</div></div>`;
+}
+
+// ---- v4: first-run welcome (web only) ----
+// Replaces the old "silently open settings" first visit: a stranger from a link
+// gets one panel that explains the page and captures call + grid (or geolocates
+// the grid locally — coordinates never leave the browser). Committing reloads,
+// like any station edit. Skipping just remembers not to ask again.
+function showWelcome() {
+  const wrap = document.createElement("div");
+  wrap.id = "hcWelcome";
+  wrap.innerHTML =
+    `<div class="hcWelcomePanel">`
+    + `<div class="hcWelcomeTitle">HamClock Web</div>`
+    + `<div class="hcWelcomeBody">`
+      + `<p class="hcWelcomePitch">Your shack clock, anywhere: live <b>DX spots</b>, <b>space weather</b>, `
+      + `<b>band conditions</b>, and a real-time <b>grayline globe</b> — all in your browser. `
+      + `No install, no account. Set your station to localize the map, weather, and sun times.</p>`
+      + `<div class="hcSetLbl">Callsign (optional)</div>`
+      + `<input class="hcSetInput" data-wcall type="text" maxlength="12" placeholder="N0CALL" autocapitalize="characters" autocomplete="off">`
+      + `<div class="hcSetLbl">Grid square (QTH)</div>`
+      + `<div class="hcWelcomeRow">`
+        + `<input class="hcSetInput" data-wgrid type="text" maxlength="6" placeholder="EM78 or EM78cg" autocapitalize="characters" autocomplete="off">`
+        + `<button class="hcWelcomeBtn hcWelcomeLoc" data-wloc title="Compute your grid from this device's location (stays in your browser)">&#128205; Locate</button>`
+      + `</div>`
+      + `<p class="hcWelcomeErr" data-werr></p>`
+      + `<button class="hcWelcomeBtn hcWelcomeGo" data-wgo disabled>Start</button>`
+      + `<button class="hcWelcomeSkip" data-wskip>Just look around &rarr;</button>`
+      + `<p class="hcWelcomeHint">Privacy: your call and grid stay in this browser (localStorage) and are only used to query the public data feeds. Tip: share a pre-set link with ?call=&amp;grid=</p>`
+    + `</div></div>`;
+  document.body.appendChild(wrap);
+  const callEl = wrap.querySelector("[data-wcall]"), gridEl = wrap.querySelector("[data-wgrid]");
+  const goEl = wrap.querySelector("[data-wgo]"), errEl = wrap.querySelector("[data-werr]");
+  const validate = () => {
+    const ok = GRID_RE.test(gridEl.value.trim().toUpperCase());
+    goEl.disabled = !ok;
+    errEl.textContent = !ok && gridEl.value.trim().length >= 4 ? "Grid looks off — like EM78 or EM78cg (letters A-R, digits, letters A-X)." : "";
+    return ok;
+  };
+  gridEl.addEventListener("input", validate);
+  const commit = () => {
+    if (!validate()) return;
+    const call = callEl.value.trim().toUpperCase();
+    if (call) lsSet("hcCall", call);
+    lsSet("hcGrid", gridEl.value.trim().toUpperCase());
+    lsSet("hcWelcomed", "1");
+    location.reload();                       // caches rebuild against the new station
+  };
+  goEl.addEventListener("click", commit);
+  wrap.addEventListener("keydown", (e) => { if (e.key === "Enter") commit(); });
+  wrap.querySelector("[data-wloc]").addEventListener("click", () => {
+    if (!navigator.geolocation) { errEl.textContent = "This browser has no location service — enter your grid."; return; }
+    errEl.textContent = "";
+    navigator.geolocation.getCurrentPosition(
+      (pos) => { gridEl.value = latLonToGrid(pos.coords.latitude, pos.coords.longitude) || ""; validate(); },
+      () => { errEl.textContent = "Location unavailable or denied — enter your grid square instead."; },
+      { timeout: 10000, maximumAge: 600000 });
+  });
+  wrap.querySelector("[data-wskip]").addEventListener("click", () => {
+    lsSet("hcWelcomed", "1");
+    wrap.remove();
+  });
+  setTimeout(() => callEl.focus(), 50);
 }
 
 function drawLand(ctx, W, H) {
@@ -1343,6 +1456,7 @@ async function init() {
     if (d.pskmode != null) { lsSet("hcPskMode", d.pskmode); refreshPskNow(); renderSettings(); return; }
     if (d.pskband != null) { lsSet("hcPskBand", d.pskband); refreshPskNow(); renderSettings(); return; }
     if (d.pskcolor != null) { lsSet("hcPskColor", d.pskcolor); renderSettings(); syncUi(); return; }
+    if (d.theme != null) { theme = d.theme === "lcars" ? "lcars" : ""; lsSet("hcTheme", theme); applyTheme(); renderSettings(); renderTiles(); requestAnimationFrame(drawMap); return; }
     if (d.time != null) { timeFmt = d.time === "12" ? "12" : "24"; lsSet("hcTimeFmt", timeFmt); tickClocks(); renderSettings(); return; }
     if (d.auto != null) { autoSec = Math.max(3, Math.min(120, +d.auto || 15)); lsSet("hcAutoSec", String(autoSec)); scheduleAuto(); renderSettings(); return; }
     if (d.spin != null) { spinRate = Math.max(0.2, Math.min(4, +d.spin || 1)); lsSet("hcSpinRate", String(spinRate)); renderSettings(); return; }
@@ -1446,14 +1560,15 @@ async function init() {
   setInterval(loadSstv, 60000);          // pick up a fresh SSTV capture ~once a minute
   loadBandsImg();
   if (STANDALONE) setInterval(loadBandsImg, 30 * 60000);   // hamqsl band-cond embed image
-  // First visit on HamClock Web: open settings so the visitor sets call + grid.
-  if (STANDALONE && !lsGet("hcGrid", "")) { settingsOpen = true; renderView(); renderSettings(); }
+  // First visit on HamClock Web: the welcome panel captures call + grid (once).
+  if (STANDALONE && !lsGet("hcGrid", "") && !lsGet("hcWelcomed", "")) showWelcome();
   // Standalone warm-up: the direct-feed caches start cold (the kiosk's server
   // caches are always warm), so re-pull a few times while they fill instead of
   // waiting out the first 60s cadence.
   if (STANDALONE) for (const ms of [3000, 8000, 15000, 30000]) setTimeout(() => { pull(); pullLayers(); pullMode(); }, ms);
   refreshSatDate();                      // discover GIBS's latest date, then load the mosaic
   setInterval(refreshSatDate, 3 * 60 * 60000);  // re-check for a newer day periodically
+  if (!STANDALONE) startRig(redrawRigTile);  // live rig status + waterfall (Control Center only)
   setInterval(renderTiles, 10000);       // beacons tile advances every 10 s slot
   setInterval(tickClocks, 1000);
   setInterval(pull, 60000);
