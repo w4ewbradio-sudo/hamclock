@@ -13,7 +13,8 @@ export const TILE_W = 240, TILE_H = 140;
 // so html[data-theme] swaps recolor the canvases too. refreshTileTheme() is called
 // by hamclock.js on startup and whenever the theme changes; the literals are the
 // phosphor defaults and the no-DOM fallback (node:test imports this module).
-const C = { bg: "#0a0e18", grid: "#1c2740", green: "#7dd87d", amber: "#e8a33d", red: "#ff5f5f", dim: "#6b7a99" };
+const C = { bg: "#0a0e18", grid: "#1c2740", green: "#7dd87d", amber: "#e8a33d", red: "#ff5f5f", dim: "#6b7a99",
+  ops: false, ui: "ui-monospace, monospace" };
 export function refreshTileTheme() {
   if (typeof document === "undefined") return;
   const css = getComputedStyle(document.documentElement);
@@ -24,6 +25,11 @@ export function refreshTileTheme() {
   C.amber = v("--hc-accent", C.amber);
   C.red = v("--hc-red", C.red);
   C.dim = v("--hc-muted", C.dim);
+  // The ops theme draws LCARS tile chrome: rounded frame, orange rule, a
+  // condensed title. Canvas can only use Antonio once the CSS @font-face has
+  // actually loaded, so callers repaint on document.fonts.ready.
+  C.ops = document.documentElement.dataset.theme === "ops";
+  C.ui = C.ops ? '"Antonio","Arial Narrow",Arial,sans-serif' : "ui-monospace, monospace";
 }
 const MONO = "ui-monospace, monospace";
 const DASH = "—";
@@ -130,13 +136,13 @@ export function logline(ctx, x, y, w, h, values, minExp, maxExp, color) {
 // capped at idealPx - and idealPx scales with the tile so a big tile gets big,
 // HamClock-style numbers instead of tiny fixed text floating in empty space.
 const k = (h) => h / TILE_H;
-function fitFont(ctx, text, maxW, idealPx, bold = false) {
+function fitFont(ctx, text, maxW, idealPx, bold = false, face = MONO) {
   const wt = bold ? "bold " : "";
   let size = Math.max(7, Math.round(idealPx));
-  ctx.font = `${wt}${size}px ${MONO}`;
+  ctx.font = `${wt}${size}px ${face}`;
   const tw = ctx.measureText(String(text)).width;
   if (tw > maxW && tw > 0) size = Math.max(7, Math.floor(size * (maxW / tw)));
-  ctx.font = `${wt}${size}px ${MONO}`;
+  ctx.font = `${wt}${size}px ${face}`;
   return size;
 }
 
@@ -145,10 +151,21 @@ function fitFont(ctx, text, maxW, idealPx, bold = false) {
 function frame(ctx, w, h, title, value, attr, valueColor = C.green) {
   const s = k(h), pad = 9 * s;
   ctx.fillStyle = C.bg; ctx.fillRect(0, 0, w, h);
-  ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+  if (C.ops) {
+    // LCARS panel: rounded orange frame, condensed title, gold value.
+    const r = Math.min(14 * s, w / 2, h / 2);
+    ctx.strokeStyle = C.amber; ctx.lineWidth = Math.max(1.5, 2 * s);
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(ctx.lineWidth / 2, ctx.lineWidth / 2, w - ctx.lineWidth, h - ctx.lineWidth, r);
+    else ctx.rect(ctx.lineWidth / 2, ctx.lineWidth / 2, w - ctx.lineWidth, h - ctx.lineWidth);
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+  }
   ctx.textAlign = "left";
-  const tSize = fitFont(ctx, String(title).toUpperCase(), w - 2 * pad, 13 * s);
-  ctx.fillStyle = C.dim; ctx.fillText(String(title).toUpperCase(), pad, pad + tSize);
+  const tSize = fitFont(ctx, String(title).toUpperCase(), w - 2 * pad, 13 * s, false, C.ui);
+  ctx.fillStyle = C.ops ? C.amber : C.dim;
+  ctx.fillText(String(title).toUpperCase(), pad, pad + tSize);
   let top = pad + tSize + 5 * s;
   if (value != null) {
     const vSize = fitFont(ctx, String(value), w - 2 * pad, Math.min(36 * s, 0.42 * w), true);

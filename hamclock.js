@@ -598,15 +598,105 @@ if (STANDALONE) (() => {
     if ((call || grid) && history.replaceState) history.replaceState(null, "", location.pathname);
   } catch { /* malformed URL: ignore */ }
 })();
-// Theme: phosphor (default) or LCARS. The attribute drives the CSS variable swap;
-// the canvas tiles re-read their palette via refreshTileTheme().
-let theme = lsGet("hcTheme", "") === "lcars" ? "lcars" : "";
+// Theme: phosphor (default), LCARS (palette swap) or ops (LCARS operations
+// console -- adds a nav rail, elbow header and footer bar). The attribute
+// drives the CSS variable swap; canvas tiles re-read their palette via
+// refreshTileTheme().
+const THEMES = ["", "lcars", "ops"];
+// A stored choice always wins; HC_DEFAULT_THEME only decides what an untouched
+// browser opens with (the web build ships "ops", the kiosk stays phosphor).
+const storedTheme = lsGet("hcTheme", null);
+let theme = THEMES.includes(storedTheme) ? storedTheme
+  : (THEMES.includes(window.HC_DEFAULT_THEME) ? window.HC_DEFAULT_THEME : "");
+
+// The ops rail doubles as the overlay switchboard: each button carries the
+// same data-id the overlay chips use, so onChipClick drives it unchanged.
+// Labels follow the LCARS console convention; data-info explains what each
+// one actually toggles, through the existing tooltip.
+const OPS_RAIL = [
+  { label: "OPS",   view: "home",  info: "Recenter the globe on the station" },
+  { label: "RADIO", id: "psk",     info: "PSK Reporter: who is hearing whom right now" },
+  { label: "SOLAR", id: "aurora",  info: "OVATION auroral oval" },
+  { label: "PROP",  id: "muf",     info: "MUF(3000) contours from prop.kc2g.com" },
+  { label: "WX",    id: "grayline",info: "Grayline / terminator" },
+  { label: "DX",    id: "paths",   info: "Great-circle paths to spotted DX" },
+  { label: "SATS",  id: "sats",    info: "Amateur satellites and footprints" },
+  { label: "MOON",  id: "moon",    info: "Moon subpoint and EME window" },
+  { label: "MAP",   proj: 1,       info: "Switch between flat map and globe" },
+  { label: "SYS",   view: "settings", info: "Settings" },
+];
+function buildOpsChrome() {
+  const hc = $("hc"); if (!hc || $("hcRail")) return;
+  const rail = document.createElement("nav");
+  rail.id = "hcRail";
+  rail.innerHTML = `<div class="hcRailCap"></div>`
+    + OPS_RAIL.map((b) =>
+        `<button class="hcRailBtn" data-info="${esc(b.info)}"`
+        + (b.id ? ` data-id="${esc(b.id)}"` : "")
+        + (b.view ? ` data-railview="${esc(b.view)}"` : "")
+        + (b.proj ? ` data-railproj="1"` : "")
+        + `>${esc(b.label)}</button>`).join("")
+    + `<div class="hcRailFill"></div>`;
+  hc.insertBefore(rail, hc.firstChild);
+  rail.addEventListener("click", onRailClick);
+
+  const top = $("hcTop"), block = top?.querySelector(".hcCallBlock");
+  if (top && block) {
+    const t = document.createElement("div");
+    t.className = "hcOpsTitle";
+    t.innerHTML = `Amateur Radio Operations<small>Earth — ours to explore</small>`;
+    block.after(t);
+    const bars = document.createElement("div");
+    bars.className = "hcHdrBars";
+    bars.innerHTML = `<i></i><i></i><i></i>`;
+    t.after(bars);
+    const right = document.createElement("div");
+    right.className = "hcHdrRight";
+    right.innerHTML = `<b>USS ${esc(stationCall())}</b><small>Station status</small>`;
+    bars.after(right);
+  }
+  const foot = $("hcFoot");
+  if (foot && !foot.querySelector(".hcFootBar")) {
+    const bar = document.createElement("span");
+    bar.className = "hcFootBar";
+    foot.appendChild(bar);
+    const motto = document.createElement("span");
+    motto.className = "hcFootMotto";
+    motto.textContent = "CQ · DX · Science · Friendship · Peace";
+    foot.appendChild(motto);
+  }
+}
+function removeOpsChrome() {
+  $("hcRail")?.remove();
+  document.querySelectorAll(".hcOpsTitle,.hcHdrBars,.hcHdrRight,.hcFootBar").forEach((e) => e.remove());
+}
+function onRailClick(e) {
+  const b = e.target.closest(".hcRailBtn"); if (!b) return;
+  const d = b.dataset;
+  if (d.id) { onChipClick({ target: b }); syncRail(); return; }
+  if (d.railproj) {
+    const p = effectiveProj() === "equirect" ? "azimuthal" : "equirect";
+    projChoice = p; persistProj(p); syncUi(); return;
+  }
+  if (d.railview === "settings") { settingsOpen = !settingsOpen; renderView(); renderSettings(); return; }
+  if (d.railview === "home") { globeRotLon = 0; globeRotLat = 0; mapZoom = 1; clampMap(); renderView(); drawMap(); }
+}
+// Rail buttons light up for the overlays actually on the map.
+function syncRail() {
+  const rail = $("hcRail"); if (!rail) return;
+  rail.querySelectorAll(".hcRailBtn").forEach((b) => {
+    const id = b.dataset.id;
+    b.classList.toggle("on", id ? enabled.has(id)
+      : b.dataset.railproj ? effectiveProj() === "azimuthal" : false);
+  });
+}
 function applyTheme() {
   if (theme) document.documentElement.dataset.theme = theme;
   else delete document.documentElement.dataset.theme;
+  if (theme === "ops") buildOpsChrome(); else removeOpsChrome();
+  syncRail();
   refreshTileTheme();
 }
-applyTheme();
 let customCall = lsGet("hcCall", "").trim();
 let timeFmt = lsGet("hcTimeFmt", "24") === "12" ? "12" : "24";     // local clock: 24-hour vs 12-hour
 let autoSec = Math.max(3, Math.min(120, +lsGet("hcAutoSec", 15) || 15));   // AUTO overlay-cycle period
@@ -616,6 +706,16 @@ function applyCall() {
   const c = stationCall();
   const hdr = document.querySelector(".hcCall"); if (hdr) hdr.textContent = c;
   const de = $("hcDeTitle"); if (de) de.textContent = "DE — " + c;
+  const uss = document.querySelector(".hcHdrRight b"); if (uss) uss.textContent = "USS " + c;
+}
+// Deliberately after customCall/stationCall: the ops chrome stamps the
+// callsign into the status cap, and a `let` read before its declaration is a
+// TDZ ReferenceError that would take the whole page down.
+applyTheme();
+// Canvas paints with whatever face is resolved at draw time, so tiles drawn
+// before Antonio finishes loading come out in the fallback. Repaint once.
+if (typeof document !== "undefined" && document.fonts?.ready) {
+  document.fonts.ready.then(() => { refreshTileTheme(); renderTiles(); }).catch(() => {});
 }
 
 // ---- map zoom + pan (scroll to zoom toward the cursor, drag to pan) ----
@@ -765,7 +865,8 @@ function renderSettings() {
       + stationRows
       + `<div class="hcSetLbl">Theme</div><div class="hcSetChips">`
         + `<button class="hcSetOpt${theme === "" ? " on" : ""}" data-theme="phosphor">Phosphor</button>`
-        + `<button class="hcSetOpt${theme === "lcars" ? " on" : ""}" data-theme="lcars">LCARS</button></div>`
+        + `<button class="hcSetOpt${theme === "lcars" ? " on" : ""}" data-theme="lcars">LCARS</button>`
+        + `<button class="hcSetOpt${theme === "ops" ? " on" : ""}" data-theme="ops">Ops</button></div>`
       + `<div class="hcSetLbl">Local time</div><div class="hcSetChips">${timeBtns}</div>`
       + `<div class="hcSetLbl">Auto-cycle every</div><div class="hcSetChips">${autoBtns}</div>`
       + `<div class="hcSetLbl">Globe spin</div><div class="hcSetChips">${spinBtns}</div>`
@@ -1230,7 +1331,7 @@ function renderContext() {
   const html = o && enabled.has(o.id) ? overlayPanel(o.id, rcFor(0, 0)) : null;
   $("hcCtx").innerHTML = html || `<p class="hcMuted">&mdash;</p>`;
 }
-function syncUi() { renderChips(); renderMapCtl(); renderLegend(); renderContext(); syncAnim(); drawMap(); }
+function syncUi() { renderChips(); renderMapCtl(); renderLegend(); renderContext(); syncAnim(); syncRail(); drawMap(); }
 
 function onChipClick(e) {
   const id = e.target?.dataset?.id;
@@ -1456,7 +1557,7 @@ async function init() {
     if (d.pskmode != null) { lsSet("hcPskMode", d.pskmode); refreshPskNow(); renderSettings(); return; }
     if (d.pskband != null) { lsSet("hcPskBand", d.pskband); refreshPskNow(); renderSettings(); return; }
     if (d.pskcolor != null) { lsSet("hcPskColor", d.pskcolor); renderSettings(); syncUi(); return; }
-    if (d.theme != null) { theme = d.theme === "lcars" ? "lcars" : ""; lsSet("hcTheme", theme); applyTheme(); renderSettings(); renderTiles(); requestAnimationFrame(drawMap); return; }
+    if (d.theme != null) { theme = THEMES.includes(d.theme) ? d.theme : ""; lsSet("hcTheme", theme); applyTheme(); renderSettings(); renderTiles(); requestAnimationFrame(drawMap); return; }
     if (d.time != null) { timeFmt = d.time === "12" ? "12" : "24"; lsSet("hcTimeFmt", timeFmt); tickClocks(); renderSettings(); return; }
     if (d.auto != null) { autoSec = Math.max(3, Math.min(120, +d.auto || 15)); lsSet("hcAutoSec", String(autoSec)); scheduleAuto(); renderSettings(); return; }
     if (d.spin != null) { spinRate = Math.max(0.2, Math.min(4, +d.spin || 1)); lsSet("hcSpinRate", String(spinRate)); renderSettings(); return; }
