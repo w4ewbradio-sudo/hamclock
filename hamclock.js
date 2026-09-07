@@ -603,11 +603,21 @@ if (STANDALONE) (() => {
 // drives the CSS variable swap; canvas tiles re-read their palette via
 // refreshTileTheme().
 const THEMES = ["", "lcars", "ops"];
-// A stored choice always wins; HC_DEFAULT_THEME only decides what an untouched
-// browser opens with (the web build ships "ops", the kiosk stays phosphor).
+// Precedence: ?theme= wins, then a stored choice, then HC_DEFAULT_THEME (the
+// web build ships "ops"; the kiosk defaults to phosphor). Unlike ?style=/?proj=
+// -- which force for one load -- ?theme= PERSISTS, so a kiosk screen only needs
+// the URL once and every later plain visit keeps the look.
+const urlTheme = (() => {
+  const q = new URLSearchParams(location.search).get("theme");
+  if (q == null) return null;
+  const t = q === "phosphor" ? "" : q;          // the settings button's label for the default
+  return THEMES.includes(t) ? t : null;
+})();
 const storedTheme = lsGet("hcTheme", null);
-let theme = THEMES.includes(storedTheme) ? storedTheme
+let theme = urlTheme != null ? urlTheme
+  : THEMES.includes(storedTheme) ? storedTheme
   : (THEMES.includes(window.HC_DEFAULT_THEME) ? window.HC_DEFAULT_THEME : "");
+if (urlTheme != null) lsSet("hcTheme", theme);
 
 // The ops rail doubles as the overlay switchboard: each button carries the
 // same data-id the overlay chips use, so onChipClick drives it unchanged.

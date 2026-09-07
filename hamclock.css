@@ -693,3 +693,8 @@ html[data-theme="ops"] .hcChip { border-radius:12px; }
    flex-basis or order, so these survive its inline styles. */
 html[data-theme="ops"] #hcTop { flex-wrap:wrap; }
 html[data-theme="ops"] #hcTiles { flex-basis:100%; order:10; margin-top:2px; }
+/* renderTiles() centres the strip inline; on an ops console the panels should
+   line up under the callsign instead of floating mid-screen. Inline styles can
+   only be beaten with !important -- the alternative is teaching renderTiles
+   about themes, which would put layout policy in the wrong place. */
+html[data-theme="ops"] #hcTiles { justify-content:flex-start !important; }
