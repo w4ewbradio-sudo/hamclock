@@ -23,7 +23,7 @@ const PALETTE = (() => {
 })();
 
 // Shared, mutable state read by the tile's draw(). `wf` is the offscreen canvas.
-export const rigState = { online: false, hz: null, band: null, mode: null, ptt: null, meters: {}, wf: null, spectrum: false };
+export const rigState = { online: false, hz: null, band: null, mode: null, vfo: null, ptt: null, meters: {}, wf: null, spectrum: false };
 
 let es = null, pollTimer = null, redraw = null, off = null, offctx = null, running = false;
 
@@ -63,7 +63,7 @@ async function pollStatus() {
   try {
     const j = await (await fetch("/api/rig")).json();
     rigState.online = j.online; rigState.hz = j.hz; rigState.band = j.band;
-    rigState.mode = j.mode; rigState.ptt = j.ptt; rigState.meters = j.meters || {};
+    rigState.mode = j.mode; rigState.vfo = j.vfo || null; rigState.ptt = j.ptt; rigState.meters = j.meters || {};
   } catch { rigState.online = false; }
   redraw && redraw();
 }

@@ -1,6 +1,7 @@
 import { subsolarPoint, terminatorLat, sunTimes, isNight } from "./astro.js";
-import { listOverlays, drawOverlay, overlayPanel, ATTRIBUTIONS } from "./hc-overlays.js";
-import { drawTile, listTiles, TILE_W, TILE_H, refreshTileTheme } from "./hc-tiles.js";
+import { listOverlays, drawOverlay, overlayPanel, ATTRIBUTIONS, bandColor, BAND_ORDER } from "./hc-overlays.js";
+import { drawTile, listTiles, TILE_W, TILE_H, refreshTileTheme, opsRowLayout, conditionsWord, OPS_TILE_WEIGHTS } from "./hc-tiles.js";
+import { activeBeacons } from "./beacons.js";
 import { azimuthal, azimuthalInverse, gridToLatLon, latLonToGrid } from "./geo.js";
 import { makeGlobe3D, makeProjector } from "./hc-globe3d.js";
 import { filterPskReports } from "./hc-psk.js";
@@ -399,24 +400,66 @@ function rcFor(W, H) {
   };
 }
 
+// ---- personalization helpers (all localStorage-backed; edited in the settings panel) ----
+const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* session-only */ } };
+
+// Theme: phosphor (default), LCARS (palette swap) or ops (LCARS operations
+// console -- adds a nav rail, elbow header and footer bar). The attribute
+// drives the CSS variable swap; canvas tiles re-read their palette via
+// refreshTileTheme(). Resolved HERE, ahead of the tile-row state below, because
+// the ops console keeps its own card order/visibility (tileScope()).
+const THEMES = ["", "lcars", "ops"];
+// Precedence: ?theme= wins, then a stored choice, then HC_DEFAULT_THEME (the
+// web build ships "ops"; the kiosk defaults to phosphor). Unlike ?style=/?proj=
+// -- which force for one load -- ?theme= PERSISTS, so a kiosk screen only needs
+// the URL once and every later plain visit keeps the look.
+const urlTheme = (() => {
+  const q = new URLSearchParams(location.search).get("theme");
+  if (q == null) return null;
+  const t = q === "phosphor" ? "" : q;          // the settings button's label for the default
+  return THEMES.includes(t) ? t : null;
+})();
+const storedTheme = lsGet("hcTheme", null);
+let theme = urlTheme != null ? urlTheme
+  : THEMES.includes(storedTheme) ? storedTheme
+  : (THEMES.includes(window.HC_DEFAULT_THEME) ? window.HC_DEFAULT_THEME : "");
+if (urlTheme != null) lsSet("hcTheme", theme);
+
 // ---- v3 tile row: order from localStorage override > config ui.tileOrder > registry ----
+// The ops console has its OWN card order + visibility (stored under ":ops"
+// keys) so switching themes swaps whole layouts: ops opens on the mockup's
+// card set, phosphor/lcars keep whatever the operator arranged there.
+const OPS_TILE_PRESET = STANDALONE
+  ? ["clock", "sun", "ssn", "flux", "kp", "bands", "wx", "moon"]      // no rig off the shack PC
+  : ["clock", "sun", "ssn", "bands", "wx", "moon", "rig"];
+const tileScope = () => (theme === "ops" ? ":ops" : "");
 function loadTileOrder() {
   try {
-    const raw = JSON.parse(localStorage.getItem("hcTileOrder"));
+    const raw = JSON.parse(localStorage.getItem("hcTileOrder" + tileScope()));
     if (Array.isArray(raw) && raw.every((x) => typeof x === "string")) return raw;
   } catch { /* fall through */ }
-  return null;
+  return theme === "ops" ? OPS_TILE_PRESET.slice() : null;
 }
 function loadHiddenTiles() {
   try {
-    const raw = JSON.parse(localStorage.getItem("hcTilesHidden"));
+    const raw = JSON.parse(localStorage.getItem("hcTilesHidden" + tileScope()));
     if (Array.isArray(raw)) return new Set(raw.filter((x) => typeof x === "string"));
   } catch { /* fall through */ }
-  return new Set();
+  // ops: everything outside the preset starts hidden. (The clock card itself
+  // exists only on the desktop ops console -- see opsDesktop() -- so the other
+  // themes never need to hide it.)
+  return theme === "ops"
+    ? new Set(listTiles().filter((id) => !OPS_TILE_PRESET.includes(id)))
+    : new Set();
 }
+// The console's card strip and clock card are a desktop-width affair; the
+// mobile stack (<= 900px, matching the CSS breakpoint) keeps the header clock
+// and the plain tile grid, whatever the theme.
+const opsDesktop = () => theme === "ops" && window.innerWidth > 900;
 let hiddenTiles = loadHiddenTiles();
 function persistHiddenTiles() {
-  try { localStorage.setItem("hcTilesHidden", JSON.stringify([...hiddenTiles])); }
+  try { localStorage.setItem("hcTilesHidden" + tileScope(), JSON.stringify([...hiddenTiles])); }
   catch { /* storage unavailable -> session-only */ }
 }
 function tileData() {
@@ -436,6 +479,7 @@ function tileData() {
     ssnAttr: STANDALONE ? "NOAA SWPC" : null,   // web SSN comes from NOAA daily indices, not SILSO
     psk: layers.psk?.reports || [],
     rig: rigState, rigWf: rigState.wf,
+    local: localTimeStr(new Date()), qth: QTH_LABEL || data.station?.grid || "",   // clock card
   };
 }
 // Hover-tooltip copy: what each card / map control is showing.
@@ -481,18 +525,49 @@ const CTRL_INFO = {
 let lastTilesH = -1;
 function renderTiles() {
   const host = $("hcTiles"); if (!host) return;
-  const known = listTiles();
+  // The clock card belongs to the desktop ops console only: off it, the header
+  // shows the clock, so the card is not offered, appended, or counted.
+  const known = listTiles().filter((id) => id !== "clock" || opsDesktop());
   const saved = (loadTileOrder() || data.ui?.tileOrder || known).filter((id) => known.includes(id));
   const order = [...saved, ...known.filter((id) => !saved.includes(id))];   // append any new tiles
   const want = order.filter((id) => !hiddenTiles.has(id) && !(id === "sstv" && !sstvUrl()) && !(id === "rig" && STANDALONE));
   for (const el of [...host.querySelectorAll("canvas.hcTile")]) {
     if (!want.includes(el.dataset.id)) el.remove();
   }
+  const GAP = 8;
+  const avail = host.clientWidth || (TILE_W * 5);
+  // Ops console (desktop widths): ONE weighted row of cards, the mockup's
+  // strip -- wide clock and radio cards, standard cards between. Wraps only
+  // when a standard card would drop under ~118px; height is a share of the
+  // viewport so the globe below keeps the room it needs. The mobile stack
+  // (<= 900px) keeps the grid logic below, matching the CSS breakpoint.
+  if (opsDesktop()) {
+    const rows = opsRowLayout(want.map((id) => ({ id, weight: OPS_TILE_WEIGHTS[id] || 1 })), avail, GAP, 118);
+    const baseH = Math.round(Math.max(150, Math.min(210, window.innerHeight * 0.185)));
+    const tileH = rows.length > 1 ? Math.round(baseH * 0.78) : baseH;
+    host.style.display = noCards ? "none" : "flex";
+    host.style.flexWrap = "wrap";
+    host.style.gridTemplateColumns = "";
+    host.style.gap = `${GAP}px`;
+    host.style.justifyContent = "flex-start";
+    host.style.alignContent = "flex-start";
+    const td = tileData();
+    for (const { id, w } of rows.flat()) {
+      const el = tileEl(host, id);
+      el.style.gridColumn = ""; el.style.flex = "none";
+      el.style.width = w + "px"; el.style.height = tileH + "px";
+      host.appendChild(el);
+      drawTile(id, el, td, w, tileH);
+    }
+    const nowH = host.offsetHeight;
+    if (nowH !== lastTilesH) { lastTilesH = nowH; requestAnimationFrame(() => drawMap()); }
+    return;
+  }
+  host.style.flexWrap = "";
   // Tiles render at (up to) their natural size and flow in as FEW rows as fit, so
   // hiding cards shrinks the header (fewer rows) and hands that space to the map -
   // instead of stretching the survivors ever wider/taller. Aspect from TILE_W/H.
-  const GAP = 8, ASPECT = TILE_W / TILE_H;
-  const avail = host.clientWidth || (TILE_W * 5);
+  const ASPECT = TILE_W / TILE_H;
   const nTiles = want.length || 1;
   // Tile SIZE depends only on the available width, never on the count, so the row
   // stays the same size whether 10 cards show or 3 (fewer tiles don't balloon).
@@ -526,24 +601,13 @@ function renderTiles() {
   host.style.alignContent = "flex-start";
   const td = tileData();
   for (const id of want) {
-    let el = host.querySelector(`canvas.hcTile[data-id="${id}"]`); // ids are our own registry strings
-    if (!el) {
-      el = document.createElement("canvas");
-      el.className = "hcTile";
-      el.dataset.id = id;
-      el.dataset.info = (TILE_INFO[id] || "") + " (Double-click to hide; drag to reorder.)";
-      el.addEventListener("dblclick", () => { hiddenTiles.add(id); persistHiddenTiles(); renderView(); renderTiles(); });
-      el.draggable = true;
-      el.addEventListener("dragstart", (e) => { dragTileId = id; e.dataTransfer.effectAllowed = "move"; el.style.opacity = "0.4"; });
-      el.addEventListener("dragend", () => { el.style.opacity = ""; dragTileId = null; });
-      el.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; });
-      el.addEventListener("drop", (e) => { e.preventDefault(); if (dragTileId && dragTileId !== el.dataset.id) reorderTiles(dragTileId, el.dataset.id); });
-    }
+    const el = tileEl(host, id);
     // The rig tile is double-width (a waterfall wants the room) when the row has
     // at least 2 columns to give; otherwise it falls back to a normal single cell.
     const dbl = id === "rig" && perRow >= 2;
     const w = dbl ? tileW * 2 + GAP : tileW;
     el.style.gridColumn = dbl ? "span 2" : "";
+    el.style.flex = "";
     el.style.width = w + "px";
     el.style.height = tileH + "px";
     host.appendChild(el);            // appendChild also reorders an existing node
@@ -557,15 +621,35 @@ function renderTiles() {
   if (nowH !== lastTilesH) { lastTilesH = nowH; requestAnimationFrame(() => drawMap()); }
 }
 
-// Repaint ONLY the rig tile (driven by the waterfall SSE ~20x/sec) so we never run
-// a full renderTiles() per spectrum frame. No-op if the tile isn't currently shown.
-function redrawRigTile() {
-  const el = document.querySelector('#hcTiles canvas.hcTile[data-id="rig"]');
+// Find or create the canvas for a tile id (ids are our own registry strings).
+// Wires the hide / drag-to-reorder handlers once per element.
+function tileEl(host, id) {
+  let el = host.querySelector(`canvas.hcTile[data-id="${id}"]`);
+  if (el) return el;
+  el = document.createElement("canvas");
+  el.className = "hcTile";
+  el.dataset.id = id;
+  el.dataset.info = (TILE_INFO[id] || "") + " (Double-click to hide; drag to reorder.)";
+  el.addEventListener("dblclick", () => { hiddenTiles.add(id); persistHiddenTiles(); renderView(); renderTiles(); });
+  el.draggable = true;
+  el.addEventListener("dragstart", (e) => { dragTileId = id; e.dataTransfer.effectAllowed = "move"; el.style.opacity = "0.4"; });
+  el.addEventListener("dragend", () => { el.style.opacity = ""; dragTileId = null; });
+  el.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; });
+  el.addEventListener("drop", (e) => { e.preventDefault(); if (dragTileId && dragTileId !== el.dataset.id) reorderTiles(dragTileId, el.dataset.id); });
+  return el;
+}
+
+// Repaint ONE tile in place (the rig tile is driven by the waterfall SSE
+// ~20x/sec, the clock card by the 1 s tick) so we never run a full
+// renderTiles() per frame. No-op if the tile isn't currently shown.
+function redrawTile(id) {
+  const el = document.querySelector(`#hcTiles canvas.hcTile[data-id="${id}"]`);
   if (!el) return;
   const w = parseInt(el.style.width, 10) || TILE_W;
   const h = parseInt(el.style.height, 10) || TILE_H;
-  drawTile("rig", el, tileData(), w, h);
+  drawTile(id, el, tileData(), w, h);
 }
+const redrawRigTile = () => redrawTile("rig");
 
 function project(lon, lat, W, H) { return { x: (lon + 180) / 360 * W, y: (90 - lat) / 180 * H }; }
 
@@ -574,16 +658,15 @@ let dragTileId = null;
 function reorderTiles(fromId, toId) {
   const known = listTiles();
   let ord = (loadTileOrder() || data.ui?.tileOrder || known).filter((x) => known.includes(x));
+  ord = [...ord, ...known.filter((x) => !ord.includes(x))];   // keep unlisted tiles addressable
   ord = ord.filter((x) => x !== fromId);
   const idx = ord.indexOf(toId);
   ord.splice(idx < 0 ? ord.length : idx, 0, fromId);
-  try { localStorage.setItem("hcTileOrder", JSON.stringify(ord)); } catch { /* session-only */ }
+  try { localStorage.setItem("hcTileOrder" + tileScope(), JSON.stringify(ord)); } catch { /* session-only */ }
   renderTiles();
 }
 
-// ---- personalization (all localStorage-backed; edited in the settings panel) ----
-const lsGet = (k, d) => { try { const v = localStorage.getItem(k); return v == null ? d : v; } catch { return d; } };
-const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch { /* session-only */ } };
+// ---- personalization (lsGet/lsSet live above the tile-row section) ----
 // Shareable pre-config (web): ?call=W4EWB&grid=EM78 persists the station, then the
 // params are scrubbed from the address bar so a bookmark/copy of the URL is clean.
 // Must run before customCall/webStation read localStorage below.
@@ -598,27 +681,6 @@ if (STANDALONE) (() => {
     if ((call || grid) && history.replaceState) history.replaceState(null, "", location.pathname);
   } catch { /* malformed URL: ignore */ }
 })();
-// Theme: phosphor (default), LCARS (palette swap) or ops (LCARS operations
-// console -- adds a nav rail, elbow header and footer bar). The attribute
-// drives the CSS variable swap; canvas tiles re-read their palette via
-// refreshTileTheme().
-const THEMES = ["", "lcars", "ops"];
-// Precedence: ?theme= wins, then a stored choice, then HC_DEFAULT_THEME (the
-// web build ships "ops"; the kiosk defaults to phosphor). Unlike ?style=/?proj=
-// -- which force for one load -- ?theme= PERSISTS, so a kiosk screen only needs
-// the URL once and every later plain visit keeps the look.
-const urlTheme = (() => {
-  const q = new URLSearchParams(location.search).get("theme");
-  if (q == null) return null;
-  const t = q === "phosphor" ? "" : q;          // the settings button's label for the default
-  return THEMES.includes(t) ? t : null;
-})();
-const storedTheme = lsGet("hcTheme", null);
-let theme = urlTheme != null ? urlTheme
-  : THEMES.includes(storedTheme) ? storedTheme
-  : (THEMES.includes(window.HC_DEFAULT_THEME) ? window.HC_DEFAULT_THEME : "");
-if (urlTheme != null) lsSet("hcTheme", theme);
-
 // The ops rail doubles as the overlay switchboard: each button carries the
 // same data-id the overlay chips use, so onChipClick drives it unchanged.
 // Labels follow the LCARS console convention; data-info explains what each
@@ -633,8 +695,20 @@ const OPS_RAIL = [
   { label: "SATS",  id: "sats",    info: "Amateur satellites and footprints" },
   { label: "MOON",  id: "moon",    info: "Moon subpoint and EME window" },
   { label: "MAP",   proj: 1,       info: "Switch between flat map and globe" },
+  { label: "LOG",   view: "log",   info: STANDALONE ? "About this page" : "Open the station logbook (new tab)" },
   { label: "SYS",   view: "settings", info: "Settings" },
 ];
+// The station column's switches: overlays the rail does not already carry.
+const OPS_SWITCHES = [
+  { label: "Satellites",    id: "sats",    info: "Amateur satellites and footprints" },
+  { label: "Beacons",       id: "beacons", info: "NCDXF/IARU beacons transmitting now" },
+  { label: "Propagation",   id: "fof2",    info: "foF2 critical-frequency contours (KC2G)" },
+  { label: "Space weather", id: "drap",    info: "D-region absorption (solar X-ray blackout)" },
+];
+// Kiosk: the station's city; web: the grid square stands in (we never know
+// a visitor's town). Mirrors the hard-coded Louisville in tickClocks().
+const QTH_LABEL = STANDALONE ? null : "Louisville, KY";
+const OPS_EMBLEM = `<svg viewBox="0 0 64 80" aria-hidden="true"><path d="M32 3 L59 76 Q32 58 5 76 Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/><path d="M32 24 L43 61 Q32 52 21 61 Z" fill="var(--ops-gold)"/></svg>`;
 function buildOpsChrome() {
   const hc = $("hc"); if (!hc || $("hcRail")) return;
   const rail = document.createElement("nav");
@@ -665,8 +739,58 @@ function buildOpsChrome() {
     right.innerHTML = `<b>USS ${esc(stationCall())}</b><small>Station status</small>`;
     bars.after(right);
   }
+
+  // Station column: identity block, emblem + motto, overlay switches, and the
+  // active-overlay context panel (moved over from the side column; it moves
+  // back in removeOpsChrome so the phosphor layout is untouched).
+  const main = $("hcMain"), mapWrap = $("hcMapWrap");
+  if (main && mapWrap && !$("hcOpsLeft")) {
+    const left = document.createElement("aside");
+    left.id = "hcOpsLeft";
+    const row = (k, key) => `<div class="hcOpsRow"><span>${k}</span><b data-ops="${key}">—</b></div>`;
+    left.innerHTML =
+      `<div class="hcOpsIdent">`
+      + `<div class="hcOpsStation">`
+        + row("Station", "call") + row("Grid", "grid") + row("QTH", "qth") + row("Mode", "mode")
+        + row("UTC", "utc") + row("Local", "local") + row("Sunrise", "rise") + row("Sunset", "set")
+      + `</div>`
+      + `<div class="hcOpsEmblem">${OPS_EMBLEM}<div class="hcOpsMotto"><b>Ham radio</b><span>Boldly connecting a brighter tomorrow</span></div></div>`
+      + `<div class="hcOpsSwitches">`
+        + OPS_SWITCHES.map((b) => `<button class="hcOpsSwitch" data-id="${esc(b.id)}" data-info="${esc(b.info)}">${esc(b.label)}</button>`).join("")
+      + `</div>`
+      + `</div>`;
+    main.insertBefore(left, mapWrap);
+    const ctxPanel = $("hcCtx")?.closest(".hcPanel");
+    if (ctxPanel) left.appendChild(ctxPanel);
+    left.addEventListener("click", (e) => {
+      const b = e.target.closest(".hcOpsSwitch"); if (!b) return;
+      onChipClick({ target: b }); syncRail();
+    });
+    // Map readouts: title, focus coordinates, band ladder, live counts, the
+    // DX-paths indicator. Static shells here; renderOps() fills the numbers.
+    mapWrap.insertAdjacentHTML("beforeend",
+      `<div id="hcOpsEarth"><b>Earth</b><span>Real-time DX · active stations</span></div>`
+      + `<div id="hcOpsFocus"><b data-ops="focus">Station focus</b><span data-ops="lat">—</span><span data-ops="lon">—</span></div>`
+      + `<div id="hcOpsBands"></div>`
+      + `<div id="hcOpsStats"></div>`
+      + `<div id="hcOpsLive"><b>DX paths</b><span>real time</span><i></i></div>`);
+  }
+
   const foot = $("hcFoot");
   if (foot && !foot.querySelector(".hcFootBar")) {
+    // Wrap the loose attribution text so the console can size it independently
+    // of the "updated" stamp (unwrapped again in removeOpsChrome).
+    const attr = document.createElement("span");
+    attr.className = "hcFootAttr";
+    const upd = $("hcUpdated");
+    // everything after the stamp (text AND the web build's HamClock link) is credits
+    for (const n of [...foot.childNodes]) if (n !== upd && (n.nodeType !== 3 || n.textContent.trim())) attr.appendChild(n);
+    if (attr.firstChild?.nodeType === 3) attr.firstChild.textContent = attr.firstChild.textContent.replace(/^\s*·\s*/, "");
+    if (upd) upd.after(attr); else foot.appendChild(attr);
+    const left = document.createElement("span");
+    left.className = "hcFootLeft";
+    left.textContent = "Starfleet communications protocol · Amateur radio division";
+    foot.insertBefore(left, foot.firstChild);
     const bar = document.createElement("span");
     bar.className = "hcFootBar";
     foot.appendChild(bar);
@@ -678,7 +802,12 @@ function buildOpsChrome() {
 }
 function removeOpsChrome() {
   $("hcRail")?.remove();
-  document.querySelectorAll(".hcOpsTitle,.hcHdrBars,.hcHdrRight,.hcFootBar").forEach((e) => e.remove());
+  const ctxPanel = $("hcCtx")?.closest(".hcPanel"), side = $("hcSide"), spots = side?.querySelector(".hcSpotsPanel");
+  if (ctxPanel && side && ctxPanel.parentElement !== side) side.insertBefore(ctxPanel, spots || null);
+  $("hcOpsLeft")?.remove();
+  const attr = document.querySelector("#hcFoot .hcFootAttr");
+  if (attr) attr.replaceWith(document.createTextNode(" · "), ...attr.childNodes);   // keeps the web build's link
+  document.querySelectorAll(".hcOpsTitle,.hcHdrBars,.hcHdrRight,.hcFootBar,.hcFootLeft,.hcFootMotto,#hcOpsEarth,#hcOpsFocus,#hcOpsBands,#hcOpsStats,#hcOpsLive").forEach((e) => e.remove());
 }
 function onRailClick(e) {
   const b = e.target.closest(".hcRailBtn"); if (!b) return;
@@ -689,9 +818,14 @@ function onRailClick(e) {
     projChoice = p; persistProj(p); syncUi(); return;
   }
   if (d.railview === "settings") { settingsOpen = !settingsOpen; renderView(); renderSettings(); return; }
+  if (d.railview === "log") {
+    if (STANDALONE) { aboutOpen = !aboutOpen; renderView(); renderAbout(); }
+    else window.open("/#/logbook", "_blank", "noopener");   // a new tab: the wall display stays put
+    return;
+  }
   if (d.railview === "home") { globeRotLon = 0; globeRotLat = 0; mapZoom = 1; clampMap(); renderView(); drawMap(); }
 }
-// Rail buttons light up for the overlays actually on the map.
+// Rail buttons + station switches light up for the overlays actually on the map.
 function syncRail() {
   const rail = $("hcRail"); if (!rail) return;
   rail.querySelectorAll(".hcRailBtn").forEach((b) => {
@@ -699,6 +833,63 @@ function syncRail() {
     b.classList.toggle("on", id ? enabled.has(id)
       : b.dataset.railproj ? effectiveProj() === "azimuthal" : false);
   });
+  document.querySelectorAll("#hcOpsLeft .hcOpsSwitch").forEach((b) => b.classList.toggle("on", enabled.has(b.dataset.id)));
+  $("hcOpsLive")?.classList.toggle("on", visibleIds().includes("paths"));
+}
+// Ops readouts: station block, focus coordinates, band ladder, live counts.
+// Cheap DOM diffs (only changed text is touched) so callers can be generous.
+const setOps = (key, text) => {
+  document.querySelectorAll(`[data-ops="${key}"]`).forEach((el) => { if (el.textContent !== text) el.textContent = text; });
+};
+function renderOps() {
+  if (theme !== "ops" || !$("hcOpsLeft")) return;
+  const st = data.station || {}, now = new Date();
+  const t = sunTimes(Number(st.lat), Number(st.lon), now);
+  setOps("call", stationCall());
+  setOps("grid", String(st.grid || "—").toUpperCase());
+  setOps("qth", QTH_LABEL || `${Math.abs(Number(st.lat)).toFixed(2)}° ${st.lat < 0 ? "S" : "N"}  ${Math.abs(Number(st.lon)).toFixed(2)}° ${st.lon < 0 ? "W" : "E"}`);
+  setOps("mode", $("hcModeV")?.textContent || "—");
+  setOps("rise", hhmm(t.riseUTC) + "Z");
+  setOps("set", hhmm(t.setUTC) + "Z");
+  renderOpsClocks(now);
+  renderOpsFocus();
+  // band ladder: every HF band, lit where the cluster is spotting right now
+  const counts = {};
+  for (const s of data.spots || []) if (s.band) counts[s.band] = (counts[s.band] || 0) + 1;
+  const ladder = $("hcOpsBands");
+  if (ladder) {
+    const html = BAND_ORDER.filter((b) => !["60m", "70cm"].includes(b)).map((b) =>
+      `<div class="${counts[b] ? "on" : ""}" data-info="${esc(b)}: ${counts[b] || 0} DX spot${counts[b] === 1 ? "" : "s"} in the last batch"><span>${esc(b.toUpperCase())}</span><i style="background:${bandColor(b)}"></i></div>`).join("");
+    if (ladder.innerHTML !== html) ladder.innerHTML = html;
+  }
+  const stats = $("hcOpsStats");
+  if (stats) {
+    const kp = data.spacewx?.kp || [], kpLast = kp.length ? kp[kp.length - 1].kp : null;
+    const rows = [
+      ["Sats", String((layers.sats?.sats || []).length)],
+      ["Beacons", String(activeBeacons(now).length)],
+      ["DX", String((data.spots || []).length)],
+      ["Conditions", conditionsWord(data.solar?.bands, kpLast)],
+    ];
+    const html = rows.map(([k, v]) => `<div><span>${k}:</span><b>${esc(v)}</b></div>`).join("");
+    if (stats.innerHTML !== html) stats.innerHTML = html;
+  }
+}
+function renderOpsClocks(now) {
+  setOps("utc", now.toISOString().slice(11, 19));
+  setOps("local", localTimeStr(now));
+}
+// Focus readout: where the map is looking (the station, unless the globe was
+// grabbed or is spinning). Called per draw so it tracks a drag live; setOps
+// only touches the DOM when the text actually changes.
+function renderOpsFocus() {
+  if (theme !== "ops" || !$("hcOpsFocus")) return;
+  const st = data.station || {};
+  const az = effectiveProj() === "azimuthal", home = globeHome();
+  const c = az && !home ? globeCenter(true) : { lat: Number(st.lat), lon: Number(st.lon) };
+  setOps("focus", az && !home ? "Globe focus" : "Station focus");
+  setOps("lat", Number.isFinite(c.lat) ? `${Math.abs(c.lat).toFixed(2)}° ${c.lat < 0 ? "S" : "N"}` : "—");
+  setOps("lon", Number.isFinite(c.lon) ? `${Math.abs(c.lon).toFixed(2)}° ${c.lon < 0 ? "W" : "E"}` : "—");
 }
 function applyTheme() {
   if (theme) document.documentElement.dataset.theme = theme;
@@ -717,6 +908,16 @@ function applyCall() {
   const hdr = document.querySelector(".hcCall"); if (hdr) hdr.textContent = c;
   const de = $("hcDeTitle"); if (de) de.textContent = "DE — " + c;
   const uss = document.querySelector(".hcHdrRight b"); if (uss) uss.textContent = "USS " + c;
+  setOps("call", c);
+}
+// Local wall-clock text. Kiosk pins the station timezone; standalone uses the
+// visitor's local zone. Shared by the header clock, the clock card, and the
+// ops station block.
+function localTimeStr(now) {
+  try {
+    const opts = STANDALONE ? { hour12: timeFmt === "12" } : { timeZone: "America/New_York", hour12: timeFmt === "12" };
+    return now.toLocaleTimeString("en-US", opts);
+  } catch { return "--:--:--"; }
 }
 // Deliberately after customCall/stationCall: the ops chrome stamps the
 // callsign into the status cap, and a `let` read before its declaration is a
@@ -766,7 +967,7 @@ const globeHome = () => globeRotLon === 0 && globeRotLat === 0;
 // ---- view controls: per-card picker, hide the whole row, bigger map ----
 let bigMap = false, noCards = false, cardMenuOpen = false;
 try { bigMap = localStorage.getItem("hcBig") === "1"; noCards = localStorage.getItem("hcNoCards") === "1"; } catch { /* defaults */ }
-const CARD_NAMES = { ssn: "Sunspots", flux: "Solar Flux", kp: "Kp Index", xray: "X-ray", bands: "Band Cond", sun: "Sun Image", wx: "Weather", beacons: "Beacons", moon: "Moon", spots: "PSK Bands", sstv: "SSTV RX" };
+const CARD_NAMES = { clock: "Date / Time", ssn: "Sunspots", flux: "Solar Flux", kp: "Kp Index", xray: "X-ray", bands: "Band Cond", sun: "Sun Image", wx: "Weather", beacons: "Beacons", moon: "Moon", spots: "PSK Bands", sstv: "SSTV RX", rig: "Radio" };
 function applyView() {
   const hc = $("hc"); if (!hc) return;
   hc.classList.toggle("hcBig", bigMap);
@@ -826,7 +1027,7 @@ function renderSettings() {
   const el = $("hcSettings"); if (!el) return;
   el.style.display = settingsOpen ? "block" : "none";
   if (!settingsOpen) return;
-  const cardRows = listTiles().map((id) =>
+  const cardRows = listTiles().filter((id) => id !== "clock" || theme === "ops").map((id) =>
     `<button class="hcSetOpt${hiddenTiles.has(id) ? "" : " on"}" data-card="${esc(id)}">${esc(CARD_NAMES[id] || id)}</button>`).join("");
   const ovRows = listOverlays().map((o) =>
     `<div class="hcSetRow">`
@@ -1186,6 +1387,7 @@ function drawAzimuthal(ctx, W, H) {
     // rim + label
     ctx.strokeStyle = "#1c2740"; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(d.cx, d.cy, R, 0, 2 * Math.PI); ctx.stroke();
+    if (theme === "ops" && globeSingle) { drawOpsRing(ctx, d.cx, d.cy, R); return; }
     ctx.fillStyle = "#6b7a99";
     ctx.fillText(d.label, d.cx - 20, d.cy + R + 14);
   });
@@ -1240,7 +1442,28 @@ function drawGlobe3D(ctx, W, H) {
   const de = mk(Number(st.lon), Number(st.lat), "#7dd87d", 5);
   if (de) { ctx.strokeStyle = "#7dd87d"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(de.x, de.y, 8, 0, 2 * Math.PI); ctx.stroke(); }
   ctx.restore();
+  if (theme === "ops") { drawOpsRing(ctx, cx, cy, R); return; }
   ctx.fillStyle = "#6b7a99"; ctx.fillText(home ? "DE" : "CENTER", cx - 20, cy + R + 14);
+}
+// Ops console: the LCARS scale brackets that cradle the globe -- two orange
+// arcs with degree ticks and end caps, the way the mockup frames the Earth.
+function drawOpsRing(ctx, cx, cy, R) {
+  const r1 = R + 12, tick = 7;
+  ctx.save();
+  ctx.strokeStyle = "#f96"; ctx.lineWidth = 3; ctx.lineCap = "round";
+  for (const [a0, a1] of [[Math.PI * 0.62, Math.PI * 1.38], [-Math.PI * 0.38, Math.PI * 0.38]]) {
+    ctx.beginPath(); ctx.arc(cx, cy, r1, a0, a1); ctx.stroke();
+    ctx.lineWidth = 1.5;
+    for (let a = a0; a <= a1 + 1e-6; a += Math.PI / 18) {          // 10-degree ticks
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * (r1 + 3), cy + Math.sin(a) * (r1 + 3));
+      ctx.lineTo(cx + Math.cos(a) * (r1 + 3 + tick), cy + Math.sin(a) * (r1 + 3 + tick));
+      ctx.stroke();
+    }
+    ctx.lineWidth = 3;
+    for (const a of [a0, a1]) { ctx.fillStyle = "#fc6"; ctx.beginPath(); ctx.arc(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1, 4, 0, 2 * Math.PI); ctx.fill(); }
+  }
+  ctx.restore();
 }
 
 function marker(ctx, lon, lat, W, H, color, r) {
@@ -1261,6 +1484,7 @@ function drawMap() {
   if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph; }
   else { ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, pw, ph); }
   ctx.setTransform(dpr * mapZoom, 0, 0, dpr * mapZoom, mapPanX * dpr, mapPanY * dpr);
+  if (theme === "ops") renderOpsFocus();          // console readout follows drags / spin / home
   if (effectiveProj() === "azimuthal") { drawGlobe3D(ctx, W, H); return; }
   const sub = subsolarPoint(new Date());
   drawBase(ctx, W, H, effectiveStyle(), sub);
@@ -1341,7 +1565,7 @@ function renderContext() {
   const html = o && enabled.has(o.id) ? overlayPanel(o.id, rcFor(0, 0)) : null;
   $("hcCtx").innerHTML = html || `<p class="hcMuted">&mdash;</p>`;
 }
-function syncUi() { renderChips(); renderMapCtl(); renderLegend(); renderContext(); syncAnim(); syncRail(); drawMap(); }
+function syncUi() { renderChips(); renderMapCtl(); renderLegend(); renderContext(); syncAnim(); syncRail(); renderOps(); drawMap(); }
 
 function onChipClick(e) {
   const id = e.target?.dataset?.id;
@@ -1378,9 +1602,16 @@ function renderPanels() {
     `<div class="hcKv"><span>Sunrise</span><b>${hhmm(t.riseUTC)}Z</b></div>` +
     `<div class="hcKv"><span>Sunset</span><b>${hhmm(t.setUTC)}Z</b></div>` +
     `<div class="hcKv"><span>Day length</span><b>${t.dayHours.toFixed(1)} h</b></div>`;
+  // .hcFreq and .hcSpotHead only show on the ops console (CALL / DX / FREQ /
+  // UTC table); the other themes keep the compact call-band-country-time row.
+  // Spot times: the kiosk feed carries a full ISO stamp, the web provider a
+  // pre-sliced HH:MM -- show HH:MM either way.
+  const hm = (t) => { const s = String(t || ""); return s.length > 5 ? s.slice(11, 16) : s; };
   $("hcSpots").innerHTML = data.spots.length
-    ? data.spots.map((x) => `<div class="hcSpot"><b>${esc(x.call)}</b> <span class="hcBand">${esc(x.band || (x.freqKhz/1000).toFixed(3))}</span> <span class="hcCty">${esc(x.country)}</span> <span class="hcT">${esc((x.time || "").slice(11, 16))}</span></div>`).join("")
+    ? `<div class="hcSpotHead"><span>Call</span><span>DX</span><span>Freq</span><span>UTC</span></div>`
+      + data.spots.map((x) => `<div class="hcSpot"><b>${esc(x.call)}</b> <span class="hcBand">${esc(x.band || (x.freqKhz/1000).toFixed(3))}</span> <span class="hcCty">${esc(x.country)}</span> <span class="hcFreq">${esc(Number.isFinite(x.freqKhz) ? (x.freqKhz / 1000).toFixed(3) : "")}</span> <span class="hcT">${esc(hm(x.time))}</span></div>`).join("")
     : `<p class="hcMuted">no recent spots</p>`;
+  renderOps();
 }
 
 function tickClocks() {
@@ -1388,11 +1619,8 @@ function tickClocks() {
   $("hcUtc").textContent = now.toISOString().slice(11, 19);
   $("hcUtcDate").textContent = now.toUTCString().slice(0, 16);
   $("hcMjd").textContent = "MJD " + (now.getTime() / 86400000 + 40587).toFixed(4);
-  try {
-    // Kiosk pins the station timezone; standalone uses the visitor's local zone.
-    const opts = STANDALONE ? { hour12: timeFmt === "12" } : { timeZone: "America/New_York", hour12: timeFmt === "12" };
-    $("hcLocal").textContent = now.toLocaleTimeString("en-US", opts);
-  } catch { $("hcLocal").textContent = "--:--:--"; }
+  $("hcLocal").textContent = localTimeStr(now);
+  if (theme === "ops") { renderOpsClocks(now); if (!noCards) redrawTile("clock"); }   // the console's clock lives in a card
   updateNightDim(now);
 }
 
@@ -1497,7 +1725,7 @@ async function pullLayers() {
       applyKioskPsk();                                              // filter by operator settings -> layers.psk
     }
   } catch { /* keep last layers */ }
-  renderContext(); drawMap(); renderTiles();
+  renderContext(); drawMap(); renderTiles(); renderOps();
 }
 
 // Station mode. Kiosk: the scheduler's active profile (SSTV / FT8 / VarAC).
@@ -1512,6 +1740,7 @@ async function pullMode() {
     const prof = s.activeProfileId ? (s.profiles || []).find((p) => p.id === s.activeProfileId)?.label : null;
     el.textContent = prof || (s.enabled ? "IDLE" : "—");
   } catch { /* keep last shown */ }
+  setOps("mode", $("hcModeV")?.textContent || "—");
 }
 
 async function init() {
@@ -1567,7 +1796,11 @@ async function init() {
     if (d.pskmode != null) { lsSet("hcPskMode", d.pskmode); refreshPskNow(); renderSettings(); return; }
     if (d.pskband != null) { lsSet("hcPskBand", d.pskband); refreshPskNow(); renderSettings(); return; }
     if (d.pskcolor != null) { lsSet("hcPskColor", d.pskcolor); renderSettings(); syncUi(); return; }
-    if (d.theme != null) { theme = THEMES.includes(d.theme) ? d.theme : ""; lsSet("hcTheme", theme); applyTheme(); renderSettings(); renderTiles(); requestAnimationFrame(drawMap); return; }
+    if (d.theme != null) {
+      theme = THEMES.includes(d.theme) ? d.theme : ""; lsSet("hcTheme", theme);
+      applyTheme(); hiddenTiles = loadHiddenTiles();            // each theme keeps its own card set
+      applyCall(); renderPanels(); renderSettings(); renderTiles(); syncUi(); requestAnimationFrame(drawMap); return;
+    }
     if (d.time != null) { timeFmt = d.time === "12" ? "12" : "24"; lsSet("hcTimeFmt", timeFmt); tickClocks(); renderSettings(); return; }
     if (d.auto != null) { autoSec = Math.max(3, Math.min(120, +d.auto || 15)); lsSet("hcAutoSec", String(autoSec)); scheduleAuto(); renderSettings(); return; }
     if (d.spin != null) { spinRate = Math.max(0.2, Math.min(4, +d.spin || 1)); lsSet("hcSpinRate", String(spinRate)); renderSettings(); return; }

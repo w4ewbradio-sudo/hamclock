@@ -33,8 +33,8 @@ const BAND_COLORS = {
   "30m": "#a7e65b", "20m": "#5be68a", "17m": "#5be6d0", "15m": "#5bb0e6",
   "12m": "#5b74e6", "10m": "#b06be6", "6m": "#e65bd0", "2m": "#e65b9c", "70cm": "#dfe6ef",
 };
-const BAND_ORDER = ["160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m", "2m", "70cm"];
-const bandColor = (b) => BAND_COLORS[b] || "rgba(120,200,255,0.55)";
+export const BAND_ORDER = ["160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m", "2m", "70cm"];
+export const bandColor = (b) => BAND_COLORS[b] || "rgba(120,200,255,0.55)";
 
 // Downlink center frequencies (Hz) for the watchlist birds, for live Doppler.
 const SAT_DOWNLINK_HZ = {

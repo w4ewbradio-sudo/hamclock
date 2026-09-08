@@ -231,6 +231,7 @@ body {
 .hcBand { color:var(--hc-accent); opacity:.85; }
 .hcCty { color:var(--hc-muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .hcT { color:var(--hc-muted); font-size:11px; }
+.hcSpotHead, .hcFreq { display:none; }   /* CALL/DX/FREQ/UTC table: ops console only */
 
 /* ---- v2: map overlay chrome (chips, cycle dots, legend, context panel) ---- */
 #hcMapWrap { position:relative; min-width:0; min-height:0; overflow:hidden; }
@@ -497,24 +498,29 @@ html[data-theme="lcars"] .hcWelcomeTitle {
 /* ==========================================================================
    THEME: ops  --  LCARS "operations console"
    A third profile alongside phosphor (default) and lcars. Where the lcars
-   theme is a palette swap on the phosphor layout, ops rebuilds the chrome:
-   a left nav rail, an elbow header, framed panels and a footer bar, in the
-   pastel-on-black grammar of an LCARS station display.
+   theme is a palette swap on the phosphor layout, ops rebuilds the chrome
+   after the station's console mockup: a left nav rail and elbow header, ONE
+   weighted strip of tab-labelled cards (the clock lives in a card, not the
+   header), a three-column main deck -- station column | framed globe with
+   focus / band-ladder / count readouts | live DX table -- and a footer bar.
    Everything is gated on html[data-theme="ops"], so the kiosk default view
-   and the existing lcars theme are untouched. The rail/header/footer DOM is
-   injected by buildOpsChrome() in hamclock.js and stays inert otherwise.
+   and the existing lcars theme are untouched. The rail, station column, map
+   readouts and footer pieces are injected by buildOpsChrome() in hamclock.js
+   and removed again by removeOpsChrome(); the card strip is laid out by the
+   ops branch of renderTiles() (weighted flex row), the cards themselves by
+   hc-tiles.js frame().
    ========================================================================== */
 html[data-theme="ops"] {
   --hc-bg:#000;
   --hc-surface:#000;
-  --hc-panel:#05050c;
+  --hc-panel:#040409;
   --hc-field:#14141f;
   --hc-line:#2b2b45;
   --hc-line-soft:#1a1a2a;
   --hc-line-strong:#4d4d70;
-  --hc-fg:#fc9;                  /* peach: primary values */
-  --hc-accent:#f96;              /* orange: labels + rules */
-  --hc-red:#c66;
+  --hc-fg:#fc6;                  /* gold: primary values */
+  --hc-accent:#f96;              /* orange: frames, labels, rules */
+  --hc-red:#e66;
   --hc-muted:#c9c;               /* lilac: secondary labels */
   --hc-dim:#96c;
   --hc-text:#ffeedd;
@@ -528,15 +534,18 @@ html[data-theme="ops"] {
   --hc-glow-strong:rgba(255,204,102,.55);
   --hc-font-ui:"Antonio","Arial Narrow",Arial,sans-serif;
   --hc-hdr-radius:14px;
-  /* LCARS pastels: the rail, segment bars and status caps draw from these */
+  /* LCARS pastels: the rail, segment bars, switches and status caps draw from these */
   --ops-orange:#f96;
   --ops-peach:#fc9;
   --ops-gold:#fc6;
   --ops-lilac:#c9c;
   --ops-peri:#99f;
   --ops-pink:#d89;
+  --ops-salmon:#f88;
   --ops-sky:#9cf;
   --ops-rail:104px;
+  --ops-left:236px;              /* station column */
+  --ops-side:318px;              /* DX table column */
 }
 
 /* ---- shell: the rail becomes a full-height first column ---- */
@@ -587,46 +596,102 @@ html[data-theme="ops"] .hcRailFill {
   border-radius:0 0 0 28px;   /* closes the elbow at the bottom */
 }
 
-/* ---- header: callsign, mission line, segment bars, status cap ---- */
+/* ---- header: one line -- callsign, mission line, segment bars, status cap.
+   The clock block is hidden here; the DATE / TIME card carries the time. ---- */
 html[data-theme="ops"] #hcTop {
   background:transparent; border:none;
-  padding:0 0 2px 0; gap:14px; align-items:flex-start;
+  padding:0; gap:16px; align-items:center; flex-wrap:wrap;
 }
+html[data-theme="ops"] #hc.hcNoCards #hcTop { padding:0; }   /* base noCards rule outranks the theme */
+html[data-theme="ops"] .hcCallBlock { flex-direction:row; align-items:center; gap:0; }
+html[data-theme="ops"] .hcClocks,
+html[data-theme="ops"] .hcMode { display:none; }
 html[data-theme="ops"] .hcCall {
-  border:none; background:transparent; border-radius:0;
+  border:none; background:transparent; border-radius:0; text-shadow:none;
   color:var(--ops-gold);
   font-family:var(--hc-font-ui);
-  font-size:clamp(26px,3.4vw,44px);
-  letter-spacing:.06em; padding:0 0 0 2px;
+  font-size:clamp(30px,2.6vw,46px); line-height:1;
+  letter-spacing:.06em; padding:0 6px 0 2px;
 }
 html[data-theme="ops"] .hcOpsTitle {
   color:var(--ops-orange); font-family:var(--hc-font-ui);
-  font-size:13px; letter-spacing:.16em; text-transform:uppercase;
-  line-height:1.25; padding-top:8px; white-space:nowrap;
+  font-size:13.5px; letter-spacing:.16em; text-transform:uppercase;
+  line-height:1.2; white-space:nowrap;
 }
 html[data-theme="ops"] .hcOpsTitle small {
   display:block; color:var(--ops-lilac); font-size:10.5px; letter-spacing:.14em;
 }
 html[data-theme="ops"] .hcHdrBars {
-  display:flex; gap:6px; flex:1; align-items:center; padding-top:10px; min-width:60px;
+  display:flex; gap:6px; flex:1; align-items:center; min-width:60px;
 }
-html[data-theme="ops"] .hcHdrBars i { height:22px; border-radius:11px; display:block; }
+html[data-theme="ops"] .hcHdrBars i { height:20px; border-radius:10px; display:block; }
 html[data-theme="ops"] .hcHdrBars i:nth-child(1){ flex:2; background:var(--ops-pink); }
 html[data-theme="ops"] .hcHdrBars i:nth-child(2){ flex:3; background:var(--ops-orange); }
-html[data-theme="ops"] .hcHdrBars i:nth-child(3){ flex:1; background:var(--ops-lilac); }
+html[data-theme="ops"] .hcHdrBars i:nth-child(3){ flex:.8; background:var(--ops-lilac); }
 html[data-theme="ops"] .hcHdrRight {
-  text-align:right; padding-top:8px; white-space:nowrap;
+  text-align:right; white-space:nowrap; line-height:1.15;
   font-family:var(--hc-font-ui); text-transform:uppercase;
 }
-html[data-theme="ops"] .hcHdrRight b { display:block; color:var(--ops-gold); font-size:15px; letter-spacing:.12em; }
+html[data-theme="ops"] .hcHdrRight b { display:block; color:var(--ops-gold); font-size:16px; letter-spacing:.12em; }
 html[data-theme="ops"] .hcHdrRight small { display:block; color:var(--ops-orange); font-size:10.5px; letter-spacing:.14em; }
-html[data-theme="ops"] .hcUtc { color:var(--ops-gold); }
-html[data-theme="ops"] .hcLocal { color:var(--ops-orange); }
-html[data-theme="ops"] .hcUtcDate, html[data-theme="ops"] #hcMjd { color:var(--ops-lilac); }
 
-/* ---- panels: rounded frames, black-on-orange header pills ---- */
-html[data-theme="ops"] #hcMain { gap:6px; }
-html[data-theme="ops"] #hcSide { border:none; background:transparent; gap:6px; }
+/* ---- card strip: its own flex line under the header (the ops branch of
+   renderTiles writes the per-card widths; flex-basis/order are ours) ---- */
+html[data-theme="ops"] #hcTiles { flex-basis:100%; order:10; margin-top:6px; }
+html[data-theme="ops"] canvas.hcTile { background:transparent; border-radius:14px; }
+
+/* ---- main deck: station column | globe | DX table ---- */
+html[data-theme="ops"] #hcMain {
+  grid-template-columns: var(--ops-left) 1fr var(--ops-side);
+  gap:8px; min-height:0;
+}
+html[data-theme="ops"] #hc.hcBig #hcMain { grid-template-columns: var(--ops-left) 1fr; }
+html[data-theme="ops"] #hcOpsLeft { display:flex; flex-direction:column; gap:8px; min-height:0; min-width:0; }
+html[data-theme="ops"] #hcSide { border:none; background:transparent; gap:8px; }
+/* the DE panel folds into the station block on the console */
+html[data-theme="ops"] #hcSide > .hcPanel:first-child { display:none; }
+
+/* station column: identity rows, emblem + motto, overlay switches */
+html[data-theme="ops"] .hcOpsIdent {
+  flex:none; display:flex; flex-direction:column; gap:4px;
+  border:2px solid var(--ops-orange); border-radius:14px;
+  background:var(--hc-panel); padding:10px 12px 10px;
+}
+html[data-theme="ops"] .hcOpsStation { display:flex; flex-direction:column; gap:1px; }
+html[data-theme="ops"] .hcOpsRow {
+  display:flex; justify-content:space-between; align-items:baseline; gap:10px;
+  font-family:var(--hc-font-ui); text-transform:uppercase; line-height:1.35;
+}
+html[data-theme="ops"] .hcOpsRow span { color:var(--ops-orange); font-size:11px; letter-spacing:.14em; flex:none; }
+html[data-theme="ops"] .hcOpsRow b {
+  color:var(--ops-gold); font-size:14px; font-weight:700; letter-spacing:.05em;
+  font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;
+}
+html[data-theme="ops"] .hcOpsEmblem {
+  display:flex; flex-direction:column; align-items:center; gap:6px;
+  padding:10px 0 6px; color:var(--ops-orange);
+}
+html[data-theme="ops"] .hcOpsEmblem svg { width:66px; height:82px; display:block; }
+html[data-theme="ops"] .hcOpsMotto { text-align:center; font-family:var(--hc-font-ui); text-transform:uppercase; line-height:1.25; }
+html[data-theme="ops"] .hcOpsMotto b { display:block; color:var(--ops-gold); font-size:13px; letter-spacing:.22em; }
+html[data-theme="ops"] .hcOpsMotto span { display:block; color:var(--ops-sky); font-size:10.5px; letter-spacing:.14em; max-width:190px; }
+html[data-theme="ops"] .hcOpsSwitches { display:flex; flex-direction:column; gap:5px; padding:8px 0 0; }
+html[data-theme="ops"] .hcOpsSwitch {
+  border:none; cursor:pointer; height:30px; border-radius:15px; padding:0 14px;
+  text-align:left; font-family:var(--hc-font-ui); font-weight:700; font-size:13px;
+  letter-spacing:.12em; text-transform:uppercase; color:#000;
+  background:var(--ops-pink); transition:filter .12s, background .12s;
+}
+html[data-theme="ops"] .hcOpsSwitch:nth-child(2) { background:var(--ops-lilac); }
+html[data-theme="ops"] .hcOpsSwitch:nth-child(3) { background:var(--ops-orange); }
+html[data-theme="ops"] .hcOpsSwitch:nth-child(4) { background:var(--ops-salmon); }
+html[data-theme="ops"] .hcOpsSwitch:hover { filter:brightness(1.15); }
+html[data-theme="ops"] .hcOpsSwitch:focus-visible { outline:2px solid #fff; outline-offset:-4px; }
+html[data-theme="ops"] .hcOpsSwitch.on { background:var(--ops-sky); box-shadow:inset 0 0 0 2px #fff; }
+html[data-theme="ops"] #hcOpsLeft .hcPanel { flex:1 1 auto; min-height:80px; }
+
+/* ---- panels: rounded frames with a tab hanging from the top border (the
+   same label grammar the canvas cards draw) ---- */
 html[data-theme="ops"] .hcPanel {
   border:2px solid var(--ops-orange);
   border-radius:14px;
@@ -634,67 +699,199 @@ html[data-theme="ops"] .hcPanel {
   overflow:hidden;
 }
 html[data-theme="ops"] .hcPanel h2 {
-  background:var(--ops-orange); color:#000;
-  border:none; border-radius:0;
+  align-self:flex-start; margin:0 0 0 12px; padding:4px 11px 5px;
+  background:var(--hc-panel); color:var(--ops-orange);
+  border:2px solid var(--ops-orange); border-top:none; border-radius:0 0 9px 9px;
   font-family:var(--hc-font-ui); font-weight:700;
-  font-size:12px; letter-spacing:.16em;
+  font-size:12px; letter-spacing:.16em; text-transform:uppercase;
 }
+html[data-theme="ops"] .hcSpotsPanel h2::after { content:" (live)"; }
+html[data-theme="ops"] .hcBody { padding:8px 12px 10px; }
 html[data-theme="ops"] #hcMapWrap {
   border:2px solid var(--ops-orange);
   border-radius:14px; overflow:hidden;
 }
 html[data-theme="ops"] #hcMap { background:#02040a; }
 
-/* ---- data: gold calls, lilac context, orange timestamps ---- */
-html[data-theme="ops"] .hcSpot { border-bottom:1px solid rgba(255,153,102,.18); color:var(--ops-peach); }
-html[data-theme="ops"] .hcSpot b { color:var(--ops-gold); }
+/* ---- map readouts (injected; positioned inside #hcMapWrap) ---- */
+html[data-theme="ops"] #hcOpsEarth {
+  position:absolute; top:12px; left:14px; z-index:2; pointer-events:none;
+  font-family:var(--hc-font-ui); text-transform:uppercase;
+}
+html[data-theme="ops"] #hcOpsEarth b { display:block; color:var(--ops-gold); font-size:22px; letter-spacing:.2em; line-height:1; }
+html[data-theme="ops"] #hcOpsEarth span { display:block; color:var(--ops-orange); font-size:10.5px; letter-spacing:.16em; margin-top:3px; }
+html[data-theme="ops"] #hcLegend {
+  top:58px; left:14px; background:transparent; border:none; padding:0;
+  color:var(--ops-lilac); font-family:var(--hc-font-ui); font-size:10.5px;
+  letter-spacing:.06em; text-transform:uppercase; opacity:.85;
+}
+html[data-theme="ops"] #hcView { top:12px; right:14px; }
+html[data-theme="ops"] #hcOpsFocus {
+  position:absolute; top:46px; right:14px; z-index:2; pointer-events:none;
+  padding-right:30px; text-align:right;
+  font-family:var(--hc-font-ui); text-transform:uppercase; line-height:1.2;
+}
+html[data-theme="ops"] #hcOpsFocus::after {          /* crosshair */
+  content:""; position:absolute; right:0; top:3px; width:20px; height:20px; border-radius:50%;
+  border:1.5px solid var(--ops-orange);
+  background:
+    linear-gradient(var(--ops-orange),var(--ops-orange)) center/100% 1.5px no-repeat,
+    linear-gradient(var(--ops-orange),var(--ops-orange)) center/1.5px 100% no-repeat;
+}
+html[data-theme="ops"] #hcOpsFocus b { display:block; color:var(--ops-orange); font-size:11px; letter-spacing:.16em; }
+html[data-theme="ops"] #hcOpsFocus span { display:block; color:var(--ops-gold); font-size:13.5px; letter-spacing:.06em; font-variant-numeric:tabular-nums; }
+html[data-theme="ops"] #hcOpsBands {
+  position:absolute; right:14px; top:50%; transform:translateY(-50%); z-index:2;
+  display:flex; flex-direction:column; gap:4px;
+}
+html[data-theme="ops"] #hcOpsBands div {
+  display:flex; align-items:center; justify-content:flex-end; gap:7px;
+  font-family:var(--hc-font-ui); font-size:10.5px; letter-spacing:.1em;
+  color:var(--ops-lilac); opacity:.5; cursor:help;
+}
+html[data-theme="ops"] #hcOpsBands div i { display:block; width:30px; height:11px; border-radius:3px; }
+html[data-theme="ops"] #hcOpsBands div.on { opacity:1; color:var(--ops-gold); font-weight:700; }
+html[data-theme="ops"] #hcOpsBands div.on i { width:38px; box-shadow:0 0 8px currentColor; }
+html[data-theme="ops"] #hcOpsStats {
+  position:absolute; left:14px; bottom:14px; z-index:2; pointer-events:none;
+  font-family:var(--hc-font-ui); text-transform:uppercase;
+}
+html[data-theme="ops"] #hcOpsStats div { display:flex; gap:6px; font-size:11.5px; letter-spacing:.12em; line-height:1.45; }
+html[data-theme="ops"] #hcOpsStats span { color:var(--ops-orange); }
+html[data-theme="ops"] #hcOpsStats b { color:var(--ops-gold); font-weight:700; }
+html[data-theme="ops"] #hcOpsLive {
+  position:absolute; right:14px; bottom:14px; z-index:2; pointer-events:none;
+  display:flex; align-items:center; gap:9px; opacity:.45;
+  font-family:var(--hc-font-ui); text-transform:uppercase; line-height:1.15;
+}
+html[data-theme="ops"] #hcOpsLive.on { opacity:1; }
+html[data-theme="ops"] #hcOpsLive b { color:var(--ops-gold); font-size:11px; letter-spacing:.16em; }
+html[data-theme="ops"] #hcOpsLive span { color:var(--ops-orange); font-size:10px; letter-spacing:.14em; }
+html[data-theme="ops"] #hcOpsLive i {
+  position:relative; width:16px; height:16px; border-radius:50%;
+  border:1.5px solid var(--ops-orange);
+}
+html[data-theme="ops"] #hcOpsLive.on i::after {
+  content:""; position:absolute; inset:3px; border-radius:50%; background:var(--ops-gold);
+  animation:hcOpsPulse 1.6s ease-in-out infinite;
+}
+@keyframes hcOpsPulse { 0%,100% { opacity:.25; } 50% { opacity:1; } }
+@media (prefers-reduced-motion: reduce) { html[data-theme="ops"] #hcOpsLive.on i::after { animation:none; } }
+/* map controls move to the bottom centre so the corners stay clear for readouts */
+html[data-theme="ops"] #hcMapCtl { bottom:12px; left:50%; transform:translateX(-50%); justify-content:center; width:max-content; max-width:calc(100% - 28px); }
+html[data-theme="ops"] #hcDots { bottom:42px; left:50%; transform:translateX(-50%); }
+html[data-theme="ops"] .hcChip {
+  font-family:var(--hc-font-ui); font-size:11px; letter-spacing:.12em; font-weight:700;
+  background:#0a0a12; color:var(--ops-peach); border:1px solid var(--ops-orange); border-radius:12px; padding:3px 11px;
+}
+html[data-theme="ops"] .hcChip.on { background:var(--ops-orange); color:#000; }
+html[data-theme="ops"] .hcChip.hcAutoChip.on { background:var(--ops-gold); color:#000; border-color:var(--ops-gold); }
+html[data-theme="ops"] .hcChip.live { box-shadow:0 0 8px var(--hc-glow-strong); }
+
+/* ---- DX table: CALL / DX / FREQ / UTC ---- */
+html[data-theme="ops"] .hcSpotHead {
+  display:grid; grid-template-columns:64px 1fr 52px 38px; gap:6px;
+  padding:0 0 5px; border-bottom:1px solid rgba(255,153,102,.4);
+  font-family:var(--hc-font-ui); font-size:10.5px; letter-spacing:.14em;
+  text-transform:uppercase; color:var(--ops-orange);
+}
+html[data-theme="ops"] .hcSpotHead span:nth-child(3),
+html[data-theme="ops"] .hcSpotHead span:nth-child(4) { text-align:right; }
+html[data-theme="ops"] .hcSpot {
+  display:grid; grid-template-columns:64px 1fr 52px 38px; gap:6px; align-items:baseline;
+  padding:4px 0; border-bottom:1px solid rgba(255,153,102,.14);
+  font-family:var(--hc-font-ui); font-size:12.5px; color:var(--ops-peach);
+}
+html[data-theme="ops"] .hcSpot b { color:var(--ops-gold); font-weight:700; letter-spacing:.04em; overflow:hidden; text-overflow:ellipsis; }
+html[data-theme="ops"] .hcSpot .hcBand { display:none; }
+html[data-theme="ops"] .hcSpot .hcFreq { display:block; color:var(--ops-peach); text-align:right; font-variant-numeric:tabular-nums; }
 html[data-theme="ops"] .hcCty { color:var(--ops-lilac); }
-html[data-theme="ops"] .hcT { color:var(--ops-orange); }
+html[data-theme="ops"] .hcT { color:var(--ops-orange); text-align:right; font-size:11.5px; }
 html[data-theme="ops"] .hcKv span { color:var(--ops-lilac); }
 html[data-theme="ops"] .hcKv b { color:var(--ops-gold); }
 
-/* ---- footer: bar plus motto, the way an LCARS screen closes ---- */
+/* ---- settings / about sheets pick up the console grammar ---- */
+html[data-theme="ops"] .hcSetHead { background:var(--ops-orange); color:#000; font-family:var(--hc-font-ui); font-weight:700; }
+html[data-theme="ops"] .hcSetHead .hcSetX { color:#000; }
+html[data-theme="ops"] .hcSetOpt.on { background:var(--ops-orange); color:#000; border-color:var(--ops-orange); }
+html[data-theme="ops"] .hcSetOpt.hcSetAuto.on, html[data-theme="ops"] .hcSetLock.on { background:var(--ops-gold); color:#000; border-color:var(--ops-gold); }
+html[data-theme="ops"] .hcSetOpt, html[data-theme="ops"] .hcTileRestore { border-radius:12px; }
+
+/* ---- footer: division label, bar, stamp, credits, motto ---- */
 html[data-theme="ops"] #hcFoot {
-  background:transparent; border:none;
-  display:flex; align-items:center; gap:10px;
+  background:transparent; border:none; min-width:0;
+  display:flex; align-items:center; gap:12px;
   padding:2px 0 0 0;
   font-family:var(--hc-font-ui); letter-spacing:.12em; text-transform:uppercase;
   color:var(--ops-lilac); font-size:10.5px;
 }
-html[data-theme="ops"] #hcFoot .hcFootBar {
-  flex:1; height:16px; border-radius:8px; background:var(--ops-orange);
-}
-html[data-theme="ops"] #hcUpdated { color:var(--ops-gold); }
-html[data-theme="ops"] .hcFootMotto { color:var(--ops-gold); white-space:nowrap; }
-/* the ops footer keeps the data attribution but lets it recede */
-html[data-theme="ops"] #hcFoot { min-width:0; }
-html[data-theme="ops"] .hcChip { border-radius:12px; }
+html[data-theme="ops"] .hcFootLeft { order:1; color:var(--ops-orange); white-space:nowrap; }
+html[data-theme="ops"] .hcFootBar { order:2; flex:1 1 60px; min-width:40px; height:16px; border-radius:8px; background:var(--ops-orange); }
+html[data-theme="ops"] #hcUpdated { order:3; color:var(--ops-gold); white-space:nowrap; font-family:var(--hc-font-ui); }
+html[data-theme="ops"] .hcFootAttr { order:4; flex:0 1 auto; min-width:0; max-width:44%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:.8; }
+html[data-theme="ops"] .hcFootAttr a { color:inherit; }
+html[data-theme="ops"] .hcFootMotto { order:5; color:var(--ops-gold); white-space:nowrap; }
 
-/* mobile: the rail costs more width than it earns -- fold to the stack.
-   This must come after the base mobile query (which sets display:contents
-   on #hcTop/#hcMain) so the single-column grid wins. */
+/* narrow map columns (laptops): the centred control row would touch the
+   DX-paths indicator, so that readout steps up a line. Sits AFTER the
+   #hcOpsLive rules: same specificity, so source order decides. */
+html[data-theme="ops"] #hcMapWrap { container-type:inline-size; }
+@container (max-width: 900px) {
+  html[data-theme="ops"] #hcOpsLive { bottom:48px; }
+}
+
+/* mobile: the rail and the console furniture cost more width than they earn --
+   fold to the map-first stack. This must come after the base mobile query
+   (which sets display:contents on #hcTop/#hcMain) so the single column wins.
+   The header clock returns here (the card strip sits below the map). */
 @media (max-width: 900px) {
   html[data-theme="ops"] #hc { grid-template-columns:1fr; padding:0; gap:0; }
-  html[data-theme="ops"] #hcRail { display:none; }
-  html[data-theme="ops"] #hcTop,
-  html[data-theme="ops"] #hcMain,
-  html[data-theme="ops"] #hcFoot { grid-column:1; }
+  html[data-theme="ops"] #hcRail,
+  html[data-theme="ops"] .hcOpsIdent,
+  html[data-theme="ops"] #hcOpsEarth,
+  html[data-theme="ops"] #hcOpsFocus,
+  html[data-theme="ops"] #hcOpsBands,
+  html[data-theme="ops"] #hcOpsStats,
+  html[data-theme="ops"] #hcOpsLive,
   html[data-theme="ops"] .hcHdrBars,
   html[data-theme="ops"] .hcHdrRight,
   html[data-theme="ops"] .hcFootBar,
+  html[data-theme="ops"] .hcFootLeft,
   html[data-theme="ops"] .hcFootMotto,
   html[data-theme="ops"] .hcOpsTitle { display:none; }
+  html[data-theme="ops"] #hcTop,
+  html[data-theme="ops"] #hcMain,
+  html[data-theme="ops"] #hcFoot { grid-column:1; }
+  html[data-theme="ops"] .hcCallBlock { flex-wrap:wrap; gap:10px 14px; padding:8px 12px; }
+  html[data-theme="ops"] .hcClocks { display:flex; }
+  html[data-theme="ops"] .hcMode { display:flex; }
+  html[data-theme="ops"] #hcLegend { top:12px; }
+  html[data-theme="ops"] #hcTiles { order:3; margin-top:0; }   /* back between map and panels */
+  /* the station column dissolves; its overlay panel joins the stack after the map */
+  html[data-theme="ops"] #hcOpsLeft { display:contents; }
+  html[data-theme="ops"] #hcOpsLeft > .hcPanel { order:4; }
+  html[data-theme="ops"] #hcSide > .hcPanel:first-child { display:flex; }   /* DE panel: no station block here */
+  html[data-theme="ops"] .hcChip { padding:9px 14px; font-size:12px; }       /* touch targets, as the base stack */
+  html[data-theme="ops"] #hcMapCtl { bottom:14px; left:12px; right:12px; transform:none; width:auto; max-width:none; justify-content:flex-start; }
+  html[data-theme="ops"] #hcDots { bottom:auto; top:52px; left:auto; right:14px; transform:none; }
+  html[data-theme="ops"] #hcFoot { padding:6px 12px; flex-wrap:wrap; gap:4px 10px; }
+  html[data-theme="ops"] .hcFootAttr { max-width:none; white-space:normal; overflow:visible; flex-basis:100%; }
   html[data-theme="ops"] #hcMapWrap,
   html[data-theme="ops"] .hcPanel { border-radius:0; border-width:1px; }
+  html[data-theme="ops"] .hcPanel h2 { margin:0; border:none; border-radius:0; background:var(--ops-orange); color:#000; align-self:stretch; }
 }
-
-/* ops: the header is its own band, so the tile strip wraps to the next line.
-   renderTiles() writes display/grid-template-columns/gap inline, but not
-   flex-basis or order, so these survive its inline styles. */
-html[data-theme="ops"] #hcTop { flex-wrap:wrap; }
-html[data-theme="ops"] #hcTiles { flex-basis:100%; order:10; margin-top:2px; }
-/* renderTiles() centres the strip inline; on an ops console the panels should
-   line up under the callsign instead of floating mid-screen. Inline styles can
-   only be beaten with !important -- the alternative is teaching renderTiles
-   about themes, which would put layout policy in the wrong place. */
-html[data-theme="ops"] #hcTiles { justify-content:flex-start !important; }
+@media (max-width: 480px) {
+  html[data-theme="ops"] .hcMode { display:none; }
+}
+/* short desktop viewports (laptops): keep the overlay panel usable by
+   compacting the emblem and switches in the station column */
+@media (min-width: 901px) and (max-height: 860px) {
+  html[data-theme="ops"] .hcOpsEmblem { padding:4px 0 2px; gap:3px; }
+  html[data-theme="ops"] .hcOpsEmblem svg { width:44px; height:55px; }
+  html[data-theme="ops"] .hcOpsMotto b { font-size:12px; }
+  html[data-theme="ops"] .hcOpsMotto span { font-size:9.5px; }
+  html[data-theme="ops"] .hcOpsSwitches { gap:4px; padding-top:6px; }
+  html[data-theme="ops"] .hcOpsSwitch { height:26px; font-size:12px; }
+  html[data-theme="ops"] .hcOpsRow { line-height:1.25; }
+  html[data-theme="ops"] .hcOpsIdent { padding:8px 12px; }
+}

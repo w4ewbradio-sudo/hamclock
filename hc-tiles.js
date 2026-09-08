@@ -14,7 +14,7 @@ export const TILE_W = 240, TILE_H = 140;
 // by hamclock.js on startup and whenever the theme changes; the literals are the
 // phosphor defaults and the no-DOM fallback (node:test imports this module).
 const C = { bg: "#0a0e18", grid: "#1c2740", green: "#7dd87d", amber: "#e8a33d", red: "#ff5f5f", dim: "#6b7a99",
-  ops: false, ui: "ui-monospace, monospace" };
+  good: "#7dd87d", ops: false, ui: "ui-monospace, monospace" };
 export function refreshTileTheme() {
   if (typeof document === "undefined") return;
   const css = getComputedStyle(document.documentElement);
@@ -30,7 +30,80 @@ export function refreshTileTheme() {
   // actually loaded, so callers repaint on document.fonts.ready.
   C.ops = document.documentElement.dataset.theme === "ops";
   C.ui = C.ops ? '"Antonio","Arial Narrow",Arial,sans-serif' : "ui-monospace, monospace";
+  // "Good" band conditions stay green on the ops console (its primary value
+  // color is LCARS gold, which would make Good and Fair read alike).
+  C.good = C.ops ? "#7de6a0" : C.green;
 }
+
+// ---- ops console: weighted single-row card strip ----
+// Relative widths of the cards on the ops console (1 = a standard card). The
+// clock and the radio card carry more content, so they take more of the row.
+export const OPS_TILE_WEIGHTS = {
+  clock: 1.55, sun: 1, ssn: 0.9, flux: 0.9, kp: 0.9, xray: 0.9, bands: 1.35, wx: 1.1,
+  beacons: 1, moon: 1, spots: 1, sstv: 1.2, rig: 1.95,
+};
+// Lay `items` ({id, weight}) into rows across `avail` px with `gap` between
+// cards. One row whenever a weight-1 card would still be at least `minUnit`
+// wide; otherwise the strip wraps into as few rows as needed, split by
+// cumulative weight. Every row's widths + gaps sum to `avail` exactly.
+export function opsRowLayout(items, avail, gap, minUnit) {
+  const list = (items || []).filter((t) => t && t.id);
+  if (!list.length) return [];
+  const total = list.reduce((s, t) => s + (t.weight > 0 ? t.weight : 1), 0);
+  const need = total * minUnit + (list.length - 1) * gap;
+  const nRows = Math.max(1, Math.min(list.length, Math.ceil(need / Math.max(1, avail))));
+  const rows = [];
+  if (nRows === 1) rows.push(list.slice());
+  else {
+    const target = total / nRows;
+    let cur = [], acc = 0;
+    for (const t of list) {
+      cur.push(t); acc += t.weight > 0 ? t.weight : 1;
+      if (acc >= target - 1e-9 && rows.length < nRows - 1) { rows.push(cur); cur = []; acc = 0; }
+    }
+    if (cur.length) rows.push(cur);
+  }
+  return rows.map((row) => {
+    const wsum = row.reduce((s, t) => s + (t.weight > 0 ? t.weight : 1), 0);
+    const unit = (avail - (row.length - 1) * gap) / wsum;
+    let used = 0;
+    return row.map((t, i) => {
+      const w = i === row.length - 1
+        ? avail - (row.length - 1) * gap - used
+        : Math.floor((t.weight > 0 ? t.weight : 1) * unit);
+      used += w;
+      return { id: t.id, w };
+    });
+  });
+}
+
+// One-word verdict for the map's CONDITIONS readout: the hamqsl band table
+// when we have it (Good=2 / Fair=1 / Poor=0 averaged over day+night), else
+// the planetary Kp, else a dash.
+export function conditionsWord(bands, kp) {
+  const vals = [];
+  for (const b of Object.values(bands || {})) {
+    for (const c of [b?.day, b?.night]) {
+      if (/good/i.test(c)) vals.push(2); else if (/fair/i.test(c)) vals.push(1); else if (/poor/i.test(c)) vals.push(0);
+    }
+  }
+  if (vals.length) {
+    const avg = vals.reduce((s, x) => s + x, 0) / vals.length;
+    return avg >= 1.4 ? "GOOD" : avg >= 0.7 ? "FAIR" : "POOR";
+  }
+  if (Number.isFinite(kp)) return kp < 4 ? "GOOD" : kp < 5 ? "FAIR" : "POOR";
+  return DASH;
+}
+
+// Band-edge dial for the radio card: which band a frequency (Hz) sits in and
+// how far across it (0..1). null off-band.
+export function bandScale(hz) {
+  const khz = Number(hz) / 1000;
+  if (!Number.isFinite(khz)) return null;
+  for (const [lo, hi, b] of BAND_EDGES) if (khz >= lo && khz <= hi) return { band: b, loKhz: lo, hiKhz: hi, frac: (khz - lo) / (hi - lo) };
+  return null;
+}
+export function fmtMhz(khz) { return Number.isFinite(Number(khz)) && khz != null ? (Number(khz) / 1000).toFixed(3) : DASH; }
 const MONO = "ui-monospace, monospace";
 const DASH = "—";
 
@@ -146,27 +219,67 @@ function fitFont(ctx, text, maxW, idealPx, bold = false, face = MONO) {
   return size;
 }
 
+// Rounded-rect path with a per-corner radius array where the browser has
+// roundRect (every kiosk/web target does); a plain rect otherwise.
+function rr(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+}
+
 // Tile bg/border + an eyebrow title with (optionally) a big value stacked below.
 // Returns the y where the tile's own content can start (below the header).
-function frame(ctx, w, h, title, value, attr, valueColor = C.green) {
+// opts.sub: a caption under the title (ops); opts.pill: {text, fill} status
+// cap at the top-right of the header row (ops), e.g. the radio card's RX/TX.
+function frame(ctx, w, h, title, value, attr, valueColor = C.green, opts = {}) {
   const s = k(h), pad = 9 * s;
+  const label = String(title).toUpperCase();
   ctx.fillStyle = C.bg; ctx.fillRect(0, 0, w, h);
+  let top;
   if (C.ops) {
-    // LCARS panel: rounded orange frame, condensed title, gold value.
+    // LCARS panel: rounded orange frame with the title in a tab that hangs
+    // from the top border (its top edge IS the border), the way a console
+    // frame labels itself. Values are gold, captions lilac.
+    const lw = Math.max(1.5, 2 * s);
     const r = Math.min(14 * s, w / 2, h / 2);
-    ctx.strokeStyle = C.amber; ctx.lineWidth = Math.max(1.5, 2 * s);
-    ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(ctx.lineWidth / 2, ctx.lineWidth / 2, w - ctx.lineWidth, h - ctx.lineWidth, r);
-    else ctx.rect(ctx.lineWidth / 2, ctx.lineWidth / 2, w - ctx.lineWidth, h - ctx.lineWidth);
-    ctx.stroke();
+    ctx.strokeStyle = C.amber; ctx.lineWidth = lw;
+    rr(ctx, lw / 2, lw / 2, w - lw, h - lw, r); ctx.stroke();
+    const tabX = r + lw;
+    // the label must fit INSIDE the tab, and the tab inside the frame corners
+    const tSize = fitFont(ctx, label, Math.min(w * 0.7, w - 2 * tabX - 18 * s), 12.5 * s, true, C.ui);
+    const tw = ctx.measureText(label).width;
+    const tabH = Math.round(tSize + 9 * s), tabW = Math.min(w - 2 * tabX, tw + 18 * s), tabR = Math.min(9 * s, tabH / 2);
+    ctx.fillStyle = C.bg;
+    rr(ctx, tabX, 0, tabW, tabH + lw / 2, [0, 0, tabR, tabR]); ctx.fill();       // cut the border under the tab
+    ctx.strokeStyle = C.amber; ctx.lineWidth = lw;
+    rr(ctx, tabX, lw / 2, tabW, tabH, [0, 0, tabR, tabR]); ctx.stroke();
+    ctx.fillStyle = C.amber; ctx.textAlign = "left";
+    ctx.fillText(label, tabX + 9 * s, lw / 2 + tabH / 2 + tSize * 0.36);
+    if (opts.pill && opts.pill.text) {
+      const pt = String(opts.pill.text).toUpperCase();
+      const pSize = fitFont(ctx, pt, w * 0.3, 10.5 * s, true, C.ui);
+      const pw = ctx.measureText(pt).width + 14 * s, ph = Math.max(10 * s, tabH - 10 * s);
+      const px = w - r - lw - pw, py = lw / 2 + 5 * s;
+      ctx.fillStyle = opts.pill.fill || C.amber;
+      rr(ctx, px, py, pw, ph, ph / 2); ctx.fill();
+      ctx.fillStyle = "#000"; ctx.textAlign = "center";
+      ctx.fillText(pt, px + pw / 2, py + ph / 2 + pSize * 0.36);
+      ctx.textAlign = "left";
+    }
+    top = tabH + lw + 5 * s;
+    if (opts.sub) {
+      const sub = String(opts.sub).toUpperCase();
+      const subSize = fitFont(ctx, sub, w - 2 * pad, 11 * s, false, C.ui);
+      ctx.fillStyle = C.dim; ctx.fillText(sub, pad, top + subSize);
+      top += subSize + 4 * s;
+    }
   } else {
     ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+    ctx.textAlign = "left";
+    const tSize = fitFont(ctx, label, w - 2 * pad, 13 * s, false, C.ui);
+    ctx.fillStyle = C.dim;
+    ctx.fillText(label, pad, pad + tSize);
+    top = pad + tSize + 5 * s;
   }
-  ctx.textAlign = "left";
-  const tSize = fitFont(ctx, String(title).toUpperCase(), w - 2 * pad, 13 * s, false, C.ui);
-  ctx.fillStyle = C.ops ? C.amber : C.dim;
-  ctx.fillText(String(title).toUpperCase(), pad, pad + tSize);
-  let top = pad + tSize + 5 * s;
   if (value != null) {
     const vSize = fitFont(ctx, String(value), w - 2 * pad, Math.min(36 * s, 0.42 * w), true);
     ctx.fillStyle = valueColor; ctx.textAlign = "right";
@@ -174,7 +287,7 @@ function frame(ctx, w, h, title, value, attr, valueColor = C.green) {
     ctx.textAlign = "left";
     top += vSize + 6 * s;
   }
-  if (attr) { fitFont(ctx, attr, w - 2 * pad, 8.5 * s); ctx.fillStyle = C.dim; ctx.fillText(attr, pad, h - 5 * s); }
+  if (attr) { fitFont(ctx, attr, w - 2 * pad, 8.5 * s, false, C.ops ? C.ui : MONO); ctx.fillStyle = C.dim; ctx.fillText(attr, pad, h - 5 * s); }
   return top;
 }
 function chartBox(w, h, top) {
@@ -186,10 +299,41 @@ function chartBox(w, h, top) {
 
 // hamqsl band-condition word -> color.
 function condColor(c) {
-  return /good/i.test(c) ? C.green : /fair/i.test(c) ? C.amber : /poor/i.test(c) ? C.red : C.dim;
+  return /good/i.test(c) ? C.good : /fair/i.test(c) ? C.amber : /poor/i.test(c) ? C.red : C.dim;
 }
 
 const TILES = [
+  // Date/time card: the ops console moves the clock off the header and into
+  // the card strip (the mockup's DATE / TIME panel). Also fine on phosphor,
+  // where it is simply hidden by default. td.local / td.qth come from
+  // hamclock.js (station-zone local time; city on the kiosk, grid on the web).
+  { id: "clock", title: "DATE / TIME", draw(ctx, w, h, td) {
+    const s = k(h), pad = 10 * s, now = td.now || new Date();
+    const mjd = "MJD " + (now.getTime() / 86400000 + 40587).toFixed(4);
+    const top = frame(ctx, w, h, "Date / Time (UTC)", null, "");
+    const date = now.toUTCString().slice(0, 16).toUpperCase();          // TUE, 08 SEP 2026
+    const utc = now.toISOString().slice(11, 19);
+    const local = td.local || "--:--:--", qth = String(td.qth || "").toUpperCase();
+    const inner = w - 2 * pad, avail = Math.max(20, h - 8 * s - top);
+    // date line: the date at the left, MJD (small, lilac) at the right
+    ctx.textAlign = "left";
+    const dSize = fitFont(ctx, date, inner * 0.6, Math.min(13 * s, avail * 0.14), false, C.ui);
+    let y = top + dSize; ctx.fillStyle = C.green; ctx.fillText(date, pad, y);
+    if (fitFont(ctx, mjd, inner * 0.36, Math.min(9.5 * s, dSize * 0.8), false, C.ui) >= 7) {
+      ctx.textAlign = "right"; ctx.fillStyle = C.dim; ctx.fillText(mjd, w - pad, y); ctx.textAlign = "left";
+    }
+    const uSize = fitFont(ctx, utc, inner, Math.min(40 * s, avail * 0.42), true);
+    y += uSize + 3 * s; ctx.fillStyle = C.green; ctx.fillText(utc, pad, y);
+    const lSize = fitFont(ctx, "LOCAL:  " + local, inner, Math.min(14 * s, avail * 0.16), true);
+    y += lSize + 6 * s;
+    ctx.font = `${lSize}px ${C.ui}`; ctx.fillStyle = C.amber; ctx.fillText("LOCAL:", pad, y);
+    const lx = pad + ctx.measureText("LOCAL:").width + 6 * s;
+    ctx.font = `bold ${lSize}px ${MONO}`; ctx.fillStyle = C.green; ctx.fillText(local, lx, y);
+    if (qth) {
+      const qSize = fitFont(ctx, qth, inner, Math.min(15 * s, avail * 0.16), true, C.ui);
+      y += qSize + 5 * s; ctx.fillStyle = C.green; ctx.fillText(qth, pad, y);
+    }
+  } },
   { id: "ssn", title: "SSN", draw(ctx, w, h, td) {
     const d = td.spacewx?.ssn || [];
     const top = frame(ctx, w, h, "SSN", d.length ? String(d[d.length - 1].ssn) : DASH, td.ssnAttr || "SILSO / Royal Obs. Belgium");
@@ -218,7 +362,7 @@ const TILES = [
   } },
   { id: "bands", title: "BANDS", draw(ctx, w, h, td) {
     const s = k(h), pad = 9 * s;
-    const top = frame(ctx, w, h, "BAND COND", null, "hamqsl");
+    const top = frame(ctx, w, h, C.ops ? "Band Conditions" : "BAND COND", null, "hamqsl");
     // Standalone build: hamqsl's XML has no CORS, so the tile shows their
     // embeddable band-conditions image instead of the parsed text table.
     if (td.bandsImg && td.bandsImg.width) {
@@ -232,17 +376,19 @@ const TILES = [
     // 3 columns: name (left, <=28% w) | DAY (right-aligned at 66% w) | NGT (right,
     // at the edge). Caps keep them from ever colliding even at big fonts.
     const colDay = w * 0.66, colNgt = w - pad;
-    const hSize = fitFont(ctx, "NGT", w * 0.18, 11 * s);
-    ctx.fillStyle = C.dim; ctx.textAlign = "right";
-    ctx.fillText("DAY", colDay, top + hSize); ctx.fillText("NGT", colNgt, top + hSize);
+    const ngt = C.ops ? "NIGHT" : "NGT";
+    const hSize = fitFont(ctx, ngt, w * 0.2, 11 * s, false, C.ui);
+    ctx.fillStyle = C.ops ? C.green : C.dim; ctx.textAlign = "right";
+    ctx.fillText("DAY", colDay, top + hSize); ctx.fillText(ngt, colNgt, top + hSize);
+    if (C.ops) { ctx.textAlign = "left"; ctx.fillText("BAND", pad, top + hSize); }
     ctx.textAlign = "left";
     const y0 = top + hSize + 3 * s, step = (h - 12 * s - y0) / Math.max(1, names.length);
     const cell = Math.min(step * 0.8, 18 * s);
     names.forEach((name, i) => {
       const y = y0 + step * (i + 0.72), bd = (td.bands || {})[name] || {};
       const dv = (bd.day || "-").slice(0, 4), nv = (bd.night || "-").slice(0, 4);
-      ctx.textAlign = "left"; ctx.fillStyle = C.dim;
-      fitFont(ctx, name, w * 0.28, cell, true); ctx.fillText(name, pad, y);
+      ctx.textAlign = "left"; ctx.fillStyle = C.ops ? C.amber : C.dim;
+      fitFont(ctx, name, w * 0.28, cell, true, C.ops ? C.ui : MONO); ctx.fillText(name, pad, y);
       ctx.textAlign = "right";
       fitFont(ctx, dv, w * 0.18, cell, true); ctx.fillStyle = condColor(bd.day); ctx.fillText(dv, colDay, y);
       fitFont(ctx, nv, w * 0.18, cell, true); ctx.fillStyle = condColor(bd.night); ctx.fillText(nv, colNgt, y);
@@ -251,7 +397,9 @@ const TILES = [
   } },
   { id: "sun", title: "SUN", draw(ctx, w, h, td) {
     const s = k(h);
-    const top = frame(ctx, w, h, td.sunLabel || "SUN HMI", null, td.sunAttr || "NASA/SDO");
+    const top = C.ops
+      ? frame(ctx, w, h, "Solar Activity", null, td.sunAttr || "NASA/SDO", C.green, { sub: td.sunLabel || "SUN — HMI" })
+      : frame(ctx, w, h, td.sunLabel || "SUN HMI", null, td.sunAttr || "NASA/SDO");
     const b = chartBox(w, h, top);
     const r = Math.min(b.w, b.h) / 2;
     const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
@@ -269,7 +417,7 @@ const TILES = [
   } },
   { id: "wx", title: "WX", draw(ctx, w, h, td) {
     const s = k(h), pad = 9 * s, wx = td.weather;
-    const top = frame(ctx, w, h, "WX DE", wx ? `${Math.round(wx.tempF)}°F` : DASH, "open-meteo.com", C.amber);
+    const top = frame(ctx, w, h, C.ops ? "Weather (WX)" : "WX DE", wx ? `${Math.round(wx.tempF)}°F` : DASH, "open-meteo.com", C.ops ? C.green : C.amber);
     if (!wx) return;
     const lines = [wx.text || "-"];
     if (wx.humidity != null) lines.push(`${wx.humidity}% RH`);
@@ -304,8 +452,9 @@ const TILES = [
     const cx = w / 2, cy = (top + areaBot) / 2;
     const angleDeg = brightLimbAngle(sunEquatorial(now), moonPosition(now));
     drawMoon(ctx, cx, cy, r, { fraction: ph.fraction, angleDeg }, td.moonTex);
-    fitFont(ctx, "az 000  el 00", w - 12 * s, 13 * s, true); ctx.fillStyle = C.green; ctx.textAlign = "center";
-    ctx.fillText(`az ${la.az.toFixed(0)}  el ${la.el.toFixed(0)}`, cx, h - 6 * s); ctx.textAlign = "left";
+    const azel = C.ops ? `AZ ${la.az.toFixed(0)}°  EL ${la.el.toFixed(0)}°` : `az ${la.az.toFixed(0)}  el ${la.el.toFixed(0)}`;
+    fitFont(ctx, C.ops ? "AZ 000°  EL -00°" : "az 000  el 00", w - 12 * s, 13 * s, true, C.ops ? C.ui : MONO); ctx.fillStyle = C.green; ctx.textAlign = "center";
+    ctx.fillText(azel, cx, h - 6 * s); ctx.textAlign = "left";
   } },
   { id: "spots", title: "SPOTS", draw(ctx, w, h, td) {
     const s = k(h), pad = 9 * s, counts = bandCounts(td.psk);
@@ -348,6 +497,7 @@ const TILES = [
     ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
   } },
   { id: "rig", title: "RIG", draw(ctx, w, h, td) {
+    if (C.ops) return drawRigOps(ctx, w, h, td);
     const r = td.rig || {}, s = k(h), pad = 8 * s, tx = r.ptt === true;
     ctx.fillStyle = C.bg; ctx.fillRect(0, 0, w, h);
     // eyebrow title + TX/RX chip
@@ -400,6 +550,74 @@ const TILES = [
     ctx.strokeStyle = C.grid; ctx.lineWidth = 1; ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
   } },
 ];
+
+// The ops console's RADIO card (the mockup's panel): frequency with VFO and
+// mode, band + S-meter, a band-edge dial with the tuned spot marked, and the
+// live receive waterfall filling what is left. RX/TX rides in the header cap.
+function drawRigOps(ctx, w, h, td) {
+  const r = td.rig || {}, s = k(h), pad = 10 * s, tx = r.ptt === true, lw = Math.max(1.5, 2 * s);
+  const pill = r.online ? { text: tx ? "TX" : "RX", fill: tx ? C.red : C.amber } : { text: "offline", fill: C.dim };
+  const top = frame(ctx, w, h, "Radio", null, "", C.green, { pill });
+  const inner = w - 2 * pad;
+  if (!r.online || !r.hz) {
+    fitFont(ctx, "rig offline", inner, 14 * s, false, C.ui); ctx.fillStyle = C.dim;
+    ctx.textAlign = "center"; ctx.fillText("rig offline", w / 2, (top + h) / 2); ctx.textAlign = "left";
+    return;
+  }
+  // row 1: frequency (big, left) + VFO / mode stacked at the right
+  const mhz = (r.hz / 1e6).toFixed(3);
+  const fSize = fitFont(ctx, mhz, inner * 0.6, 32 * s, true);
+  ctx.fillStyle = tx ? C.red : C.green; ctx.textAlign = "left"; ctx.fillText(mhz, pad, top + fSize);
+  const vfo = r.vfo ? String(r.vfo).toUpperCase().replace(/^VFO(?=[A-Z])/, "VFO ") : "";
+  const mode = String(r.mode || "").toUpperCase();
+  ctx.textAlign = "right";
+  if (vfo) { const vSize = fitFont(ctx, vfo, inner * 0.32, 11 * s, false, C.ui); ctx.fillStyle = C.dim; ctx.fillText(vfo, w - pad, top + vSize); }
+  if (mode) { const mSize = fitFont(ctx, mode, inner * 0.32, 15 * s, true, C.ui); ctx.fillStyle = C.green; ctx.fillText(mode, w - pad, top + fSize); }
+  let y = top + fSize + 7 * s;
+  // row 2: band + S-meter (STRENGTH is dB relative to S9)
+  const band = r.band || DASH;
+  ctx.textAlign = "left";
+  const bSize = fitFont(ctx, band, inner * 0.2, 13 * s, true, C.ui); ctx.fillStyle = C.amber; ctx.fillText(band, pad, y + bSize);
+  const db = r.meters ? r.meters.s : null;
+  const barX = pad + inner * 0.22, barW = inner * 0.56, barH = 5 * s, barY = y + bSize - barH;
+  ctx.fillStyle = C.grid; rr(ctx, barX, barY, barW, barH, barH / 2); ctx.fill();
+  if (db != null) {
+    const frac = Math.max(0, Math.min(1, (db + 54) / 114));
+    ctx.fillStyle = db > 0 ? C.red : C.amber; rr(ctx, barX, barY, Math.max(barH, barW * frac), barH, barH / 2); ctx.fill();
+    const units = Math.max(0, Math.min(9, Math.round((db + 54) / 6)));
+    fitFont(ctx, "S9+60", inner * 0.18, 10 * s, false, C.ui); ctx.fillStyle = C.dim; ctx.textAlign = "right";
+    ctx.fillText(db > 0 ? `S9+${Math.round(db)}` : `S${units}`, w - pad, y + bSize); ctx.textAlign = "left";
+  }
+  y += bSize + 6 * s;
+  // row 3: band-edge dial with the tuned frequency marked
+  const sc = bandScale(r.hz);
+  if (sc) {
+    const lblSize = fitFont(ctx, "00.000", inner * 0.2, 9 * s, false, C.ui);
+    const lineY = y + lblSize + 5 * s;
+    ctx.strokeStyle = C.amber; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad, lineY); ctx.lineTo(w - pad, lineY); ctx.stroke();
+    for (let i = 0; i <= 4; i++) { const tx2 = pad + inner * (i / 4); ctx.beginPath(); ctx.moveTo(tx2, lineY); ctx.lineTo(tx2, lineY + 3 * s); ctx.stroke(); }
+    const mx = pad + inner * sc.frac;
+    ctx.fillStyle = C.green;
+    ctx.beginPath(); ctx.moveTo(mx, lineY - 1); ctx.lineTo(mx - 3.5 * s, lineY - 6 * s); ctx.lineTo(mx + 3.5 * s, lineY - 6 * s); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = C.dim; ctx.textAlign = "left"; ctx.fillText(fmtMhz(sc.loKhz), pad, y + lblSize);
+    ctx.textAlign = "right"; ctx.fillText(fmtMhz(sc.hiKhz), w - pad, y + lblSize);
+    ctx.textAlign = "left";
+    y = lineY + 5 * s;
+  }
+  // waterfall fills the rest, inset inside the frame
+  const wf = td.rigWf, wfTop = Math.round(y + 2 * s), wfBot = Math.round(h - lw - 4 * s);
+  if (wfTop < wfBot - 8 * s) {
+    if (wf && wf.width) {
+      ctx.save(); rr(ctx, pad - 2 * s, wfTop, inner + 4 * s, wfBot - wfTop, 5 * s); ctx.clip();
+      ctx.drawImage(wf, pad - 2 * s, wfTop, inner + 4 * s, wfBot - wfTop);
+      ctx.restore();
+    } else {
+      fitFont(ctx, "spectrum…", inner, 10 * s, false, C.ui); ctx.fillStyle = C.dim;
+      ctx.textAlign = "center"; ctx.fillText("spectrum…", w / 2, (wfTop + wfBot) / 2 + 4 * s); ctx.textAlign = "left";
+    }
+  }
+}
 
 export function listTiles() { return TILES.map((t) => t.id); }
 
